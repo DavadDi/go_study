@@ -102,6 +102,47 @@ Go Extensions
 ### 2.3 其他事项
 
 	gdb 对于 interface{} 类型不能够提供反解析。
+	
+
+### 3. godebug
+
+跨平台的go debug的工具
+
+### 3.1 安装
+	
+	go get github.com/mailgun/godebug
+	
+### 3.2 测试
+
+在需要调试的代码中添加一下代码：
+	
+	_ = "breakpoint"
+	
+启动测试：
+	$ godebug run -instrument= gofiles... [arguments...]
+	
+	例如：
+	$ godebug run -instrument=github.com/astaxie/beego/orm main.go
+	
+
+### 3.3  Debugger commands:
+
+The current commands are:
+
+command              | result
+---------------------|------------------------
+h(elp)               | show help message
+n(ext)               | run the next line
+s(tep)               | run for one step
+c(ontinue)           | run until the next breakpoint
+l(ist)               | show the current line in context of the code around it
+p(rint) [expression] | print a variable or any other Go expression
+q(uit)               | exit the program
+
+### 3.4 总结
+
+godebug还是一个比较新的项目，能扩张的命令也比较少，但是对于一般的调试还是非常方便，能够很好支持golang的各种类型，例如 ** interface{} **
+	
 
 参考：
 
