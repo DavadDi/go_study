@@ -1,0 +1,8 @@
+test
+================
+
+go build rpcserver.go  && ./rpcserver
+go build client.go && ./client
+
+see rpc stat:
+http://127.0.0.1:1234/debug/rpc

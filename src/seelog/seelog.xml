@@ -1,0 +1,14 @@
+<seelog>
+    <outputs formatid="main">
+        <filter levels="info,critical,error">
+            <console />
+        </filter>
+        <filter levels="debug">
+            <file path="debug.txt"/>
+        </filter>
+    </outputs>
+
+    <formats>
+        <format id="main" format="%Date/%Time [%LEV] %Msg%n"/>
+    </formats>
+</seelog>

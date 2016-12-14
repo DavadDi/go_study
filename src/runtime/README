@@ -1,0 +1,18 @@
+Runtime Get go call func name file name && line
+
+
+change git email only for this repo:
+in local repository
+
+$git config user.email "your_email@example.com"
+
+$git config user.email
+
+
+Global git email
+$git config --global user.email "your_email@example.com"
+$git config --global user.email
+
+
+-------------------------------------
+user.name the same as user.email

@@ -1,0 +1,14 @@
+seelog
+---------------
+https://github.com/cihub/seelog
+
+install 
+go get -u github.com/cihub/seelog
+
+
+http://impyy.com/golang-seelog-%E4%BD%BF%E7%94%A8%E5%85%A5%E9%97%A8/?utm_source=tuicool&utm_medium=referral
+
+
+go build seelog.go
+
+go build seelog_ex.go

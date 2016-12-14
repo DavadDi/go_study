@@ -1,0 +1,5 @@
+test
+================
+
+go build rpcserver.go  && ./rpcserver
+go build client.go && ./client
