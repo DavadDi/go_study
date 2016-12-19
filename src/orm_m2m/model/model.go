@@ -24,7 +24,7 @@ type UserRoles struct {
 	Id    int       `orm:"column(id)"`
 	User  *User     `orm:"rel(fk);column(user_id)"`
 	Role  *Role     `orm:"rel(fk);column(role_id)"`
-	Added time.Time `orm:"auto_now;type(datetime)"`
+	Added time.Time `orm:"auto_now_add;type(datetime)"`
 }
 
 func init() {

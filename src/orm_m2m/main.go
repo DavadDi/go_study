@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	"github.com/astaxie/beego/orm"
 	_ "github.com/go-sql-driver/mysql"
 
@@ -41,12 +43,21 @@ func main() {
 	_ = "breakpoint"
 
 	m2m := o.QueryM2M(user, "Roles")
-	num, err := m2m.Add(role)
+	num, err := m2m.Add(role, time.Now().Format("2006-01-02 15:04:05"))
 
 	fmt.Println("num: ", num)
 
 	if err != nil {
 		fmt.Println(err)
+	}
+
+	var maps []orm.Params
+	o.QueryTable("user_roles").Filter("user_id", user.Id).Values(&maps)
+	if err == nil {
+		fmt.Printf("Result Nums: %d\n", num)
+		for _, m := range maps {
+			fmt.Println(m["Id"], m["User"], m["Role"], m["Added"])
+		}
 	}
 
 }
