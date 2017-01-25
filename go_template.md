@@ -140,3 +140,9 @@
 		t.Execute(os.Stdout, value)
 	}
 
+
+参考：
+
+1. 	[Access a map value using a variable key in a Go template](http://stackoverflow.com/questions/26152088/access-a-map-value-using-a-variable-key-in-a-go-template)
+
+2. [How to get map value by key without range action (htm/text templates)? Golang](http://stackoverflow.com/questions/28010961/how-to-get-map-value-by-key-without-range-action-htm-text-templates-golang)
