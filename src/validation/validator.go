@@ -6,34 +6,119 @@ import (
 	"log"
 	"reflect"
 	"strings"
+	"sync"
 )
 
-// For use define stuct, maybe provide another interface without params
+// Pkg init(), only set log debug
+func init() {
+	// log.SetFlags(log.Lshortfile | log.LstdFlags)
+}
+
+// For use define stuct, without params
+// If validate struct has this interface, we will call this interface firstly
 type TValidater interface {
 	TValidater() error
 }
 
+// Interface for Validators
 type Validater interface {
 	Validater(v interface{}) error
 }
 
+// Global var for validation pkg
 const (
-	ValidTag     = "valid"
-	Funseparator = ","
-	ValidIgnor   = "-"
+	ValidTag      = "valid" // Validater tag name
+	FuncSeparator = ";"     // Func sparator "required;email"
+	ValidIgnor    = "-"     // Igore for validater
+	RequiredKey   = "required"
 )
 
-// init by this pkg. no need lock
-var ValidatorsMap = map[string]Validater{
-	"email":    &EmailChecker{},
-	"required": &RequiredChecker{},
-	"url":      &UrlChecker{},
+var (
+	// Init by this pkg. no need rwlock
+	ValidatorsMap = map[string]Validater{
+		"email":     &EmailChecker{},
+		RequiredKey: &RequiredChecker{},
+		"url":       &UrlChecker{},
+	}
+
+	// Using rwlock avoid race
+	CustomValidatorsMap = NewCustomValidators()
+
+	// Output debug info or not
+	DebugFlag = false
+)
+
+// Pkg debug function, just a wrapper for log
+func Debug(arg interface{}) {
+	if DebugFlag {
+		log.Print(arg)
+	}
 }
 
-// TODO
-// need rwlock
-// var CunstomValidatorsMap
+func Debugf(format string, args ...interface{}) {
+	if DebugFlag {
+		log.Printf(format, args...)
+	}
+}
 
+// Enable validation debug log
+func EnableDebug(flag bool) {
+	DebugFlag = flag
+}
+
+// Return a new custom validater manager
+func NewCustomValidators() *CustomValidators {
+	return &CustomValidators{
+		ValidatorsMap: make(map[string]Validater),
+	}
+}
+
+// Function export to add user define Validater
+func AddValidater(name string, validater Validater) error {
+	if CustomValidatorsMap == nil {
+		CustomValidatorsMap = NewCustomValidators()
+	}
+
+	return CustomValidatorsMap.AddValidater(name, validater)
+}
+
+// Because user can add user define validater, avoid data race, add rwlock
+type CustomValidators struct {
+	ValidatorsMap map[string]Validater
+	sync.RWMutex
+}
+
+// If name conflict with CustomValidators, replace.
+// conflict with ValidatorsMap, return err
+func (cvm *CustomValidators) AddValidater(name string, validater Validater) error {
+	// check validater
+	if validater == nil {
+		return ErrValidater
+	}
+
+	// check name conflict
+	if ValidatorsMap[name] != nil {
+		return ErrValidaterExists
+	}
+
+	cvm.Lock()
+	cvm.ValidatorsMap[name] = validater
+	Debugf("Add custom validater [%s] succeed!", name)
+	cvm.Unlock()
+
+	return nil
+}
+
+// Return user define validater for name
+func (cvm *CustomValidators) FindValidater(name string) (v Validater, ok bool) {
+	cvm.RLock()
+	v, ok = cvm.ValidatorsMap[name]
+	cvm.RUnlock()
+
+	return v, ok
+}
+
+// Validation err list
 type Validation struct {
 	Errors []*Error
 }
@@ -42,7 +127,7 @@ func NewValidation() *Validation {
 	return &Validation{}
 }
 
-// return error msg
+// Return msg detail Error message
 func (mv *Validation) ErrMsg() string {
 	buf := bytes.NewBufferString("")
 
@@ -54,27 +139,28 @@ func (mv *Validation) ErrMsg() string {
 	return buf.String()
 }
 
-// clear error, maybe not need
+// Clear error, maybe not need
 func (mv *Validation) Clear() {
 	mv.Errors = nil
 }
 
-// apend error to validtion
-func (mv *Validation) AddError(err *Error) {
-	mv.Errors = append(mv.Errors, err)
+// Apend error to validtion
+func (mv *Validation) AddError(key string, v interface{}, err error) {
+	errtmp := &Error{FieldName: key, Value: v, Err: err}
+	mv.Errors = append(mv.Errors, errtmp)
 }
 
-// check has errors or not
+// Check has errors or not
 func (mv *Validation) HasError() bool {
 	return len(mv.Errors) != 0
 }
 
-// validiton entry function
-// true: check passed
-// false: don't passed, err contains the detail info
-func (mv *Validation) Validate(obj interface{}) (bool, error) {
+// Validiton entry function.
+// True: Validiton passed.
+// False: Validate don't passed, mv.ErrMsg() contains the detail info.
+func (mv *Validation) Validate(obj interface{}) bool {
 	if obj == nil {
-		return true, nil
+		return true
 	}
 
 	v := reflect.ValueOf(obj)
@@ -84,15 +170,19 @@ func (mv *Validation) Validate(obj interface{}) (bool, error) {
 
 	t := v.Type()
 
-	// here only accept structs
+	// Here only accept structs
 	if v.Kind() != reflect.Struct {
-		return false, &ErrOnlyStrcut{Type: v.Type()}
+		err := &ErrOnlyStrcut{Type: v.Type()}
+		mv.AddError("Object", obj, err)
+		return false
 	}
+
+	Debugf("Check struct [%s]", t.Name())
 
 	objvk, ok := obj.(TValidater)
 	if ok {
 		if err := objvk.TValidater(); err != nil {
-			mv.AddError(&Error{FieldName: "Object", Value: obj, Err: err})
+			mv.AddError("Object", obj, err)
 		}
 	}
 
@@ -100,14 +190,14 @@ func (mv *Validation) Validate(obj interface{}) (bool, error) {
 		tf := t.Field(i) // type field
 		vf := v.Field(i) // vaule field
 
-		// skip Anonymous and private field
+		// Skip Anonymous and private field
 		if !tf.Anonymous && len(tf.PkgPath) > 0 {
 			continue
 		}
 
 		fns := mv.getValidFuns(tf, ValidTag)
 
-		// already skip ValidIgnor flag, such as "-"
+		// Already skip ValidIgnor flag, such as "-"
 		if len(fns) == 0 {
 			continue
 		}
@@ -116,19 +206,33 @@ func (mv *Validation) Validate(obj interface{}) (bool, error) {
 	}
 
 	if mv.HasError() {
-		return false, nil
+		return false
 	}
 
-	return true, nil
+	return true
 }
 
-// valid struct field type
+func (mv *Validation) checkRequire(v reflect.Value, t reflect.StructField) error {
+	rck := ValidatorsMap[RequiredKey]
+	return rck.Validater(v.Interface())
+}
+
+// Valid struct field type
 func (mv *Validation) typeCheck(v reflect.Value, t reflect.StructField, o reflect.Value) {
 	fns := mv.getValidFuns(t, ValidTag)
 
 	// skip
 	if len(fns) == 0 {
 		return
+	}
+
+	// First check all field for required
+	if fns[RequiredKey] != nil {
+		if err := mv.checkRequire(v, t); err != nil {
+			mv.AddError(t.Name, v.Interface(), err)
+		}
+
+		delete(fns, RequiredKey)
 	}
 
 	switch v.Kind() {
@@ -138,16 +242,29 @@ func (mv *Validation) typeCheck(v reflect.Value, t reflect.StructField, o reflec
 		reflect.Float32, reflect.Float64,
 		reflect.String:
 
-		log.Printf("typeCheck: %s", v.Kind())
+		Debugf("\tCheck field [%s]", t.Name)
+
 		for fname := range fns {
-			log.Printf("CheckName: [%s]", fname)
-			if vck, ok := ValidatorsMap[fname]; ok {
-				err := vck.Validater(v.Interface())
-				if err != nil {
-					mv.AddError(&Error{FieldName: t.Name, Value: v.Interface(), Err: err})
-				}
-			} else {
-				log.Printf("can't find checker for [%s]", fname)
+			Debugf("CheckerName: [%s]", fname)
+
+			// find custom map and pkg map
+			var vck Validater
+			var find bool
+
+			if vck, find = CustomValidatorsMap.FindValidater(fname); !find {
+				vck = ValidatorsMap[fname]
+			}
+
+			if vck == nil {
+				err := fmt.Errorf("can't find checker for [%s]", fname)
+				mv.AddError(t.Name, v.Interface(), err)
+				Debugf("can't find checker for [%s]", fname)
+				continue
+			}
+
+			err := vck.Validater(v.Interface())
+			if err != nil {
+				mv.AddError(t.Name, v.Interface(), err)
 			}
 		}
 
@@ -166,7 +283,6 @@ func (mv *Validation) typeCheck(v reflect.Value, t reflect.StructField, o reflec
 				mv.typeCheck(v.Index(i), t, o)
 			} else {
 				mv.Validate(v.Index(i).Interface())
-
 			}
 		}
 
@@ -177,6 +293,7 @@ func (mv *Validation) typeCheck(v reflect.Value, t reflect.StructField, o reflec
 		}
 
 	case reflect.Ptr:
+		// only check
 		// If the value is a pointer then check its element
 		if !v.IsNil() {
 			mv.typeCheck(v.Elem(), t, o)
@@ -187,14 +304,14 @@ func (mv *Validation) typeCheck(v reflect.Value, t reflect.StructField, o reflec
 
 	// case reflect.Map: // don't support map now
 	default:
-		err := &Error{FieldName: t.Name, Value: v.Interface(), Err: fmt.Errorf("UnspportType %s", v.Type())}
-		mv.AddError(err)
+		err := fmt.Errorf("UnspportType %s", v.Type())
+		mv.AddError(t.Name, v.Interface(), err)
 	}
 
 	return
 }
 
-// return fun names and params
+// Return fun names and params
 func (mv *Validation) getValidFuns(tf reflect.StructField, tag string) map[string]interface{} {
 	out := make(map[string]interface{})
 
@@ -203,15 +320,16 @@ func (mv *Validation) getValidFuns(tf reflect.StructField, tag string) map[strin
 		return nil
 	}
 
-	for _, value := range strings.Split(opt, Funseparator) {
-		// omit func has params
+	for _, value := range strings.Split(opt, FuncSeparator) {
+		// omit func has params for now
+		value := strings.TrimSpace(value)
 		out[value] = struct{}{}
 	}
 
 	return out
 }
 
-// not used for now
+// Not used for now
 func isEmptyValue(v reflect.Value) bool {
 	switch v.Kind() {
 	case reflect.String, reflect.Array:

@@ -1,13 +1,14 @@
 package validation
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
 
 type Person struct {
 	Name     string    `valid:"required"`
-	Email    string    `valid:"required,email"`
+	Email    string    `valid:"required;email"`
 	Age      int       `valid:"-"`
 	Sex      int       ``
 	WebSites []*string `valid:"url"`
@@ -66,18 +67,20 @@ func TestGetFuns(t *testing.T) {
 
 func TestValidation(t *testing.T) {
 	valider := NewValidation()
-	res, _ := valider.Validate(person)
+	res := valider.Validate(person)
 
-	if !res {
-		t.Errorf("Validate person failed:\n %s", valider.ErrMsg())
+	// expect www failed.
+	if res {
+		t.Errorf("Validate person should failed for www:\n")
 	}
 }
 
 // Test struct interface
 func TestValidationIf(t *testing.T) {
 	validor := NewValidation()
-	if res, _ := validor.Validate(person); !res {
-		t.Errorf("Validate Interface failed:\n %s", validor.ErrMsg())
+	res := validor.Validate(person)
+	if res {
+		t.Errorf("TestValidationIf failed:\n %s", validor.ErrMsg())
 	}
 }
 
@@ -102,5 +105,95 @@ func TestEmail(t *testing.T) {
 			t.Errorf("Email check failed. [%s] should [%t]",
 				test.Email, test.Expect)
 		}
+	}
+}
+
+type AddFile struct {
+	FileName string `valid:"required"`
+	Url      string `valid:"-"`
+}
+
+func TestNestedStruct(t *testing.T) {
+	// EnableDebug(true)
+
+	person := struct {
+		Name     string     `valid:"required"`
+		Email    string     `valid:"required;email"`
+		Age      int        `valid:"-"`
+		Sex      int        ``
+		WebSites []*string  `valid:"required;url"`
+		FileAdd  []*AddFile `valid:"required"`
+		FileDel  []AddFile  `valid:"required"`
+	}{
+		Name:    "dave",
+		Email:   "aa@aa.com",
+		FileAdd: []*AddFile{&AddFile{FileName: "file1"}, &AddFile{FileName: "file2"}},
+		FileDel: []AddFile{AddFile{FileName: "file1"}, AddFile{FileName: "file2"}},
+	}
+
+	validor := NewValidation()
+	res := validor.Validate(person)
+
+	if !res {
+		Debugf("TestNestedStruct: Error %s", validor.ErrMsg())
+	}
+
+	if res {
+		t.Errorf("TestNestedStruct should failed\n")
+	}
+
+	// EnableDebug(false)
+}
+
+type NameUpperChecker struct {
+}
+
+func (my *NameUpperChecker) Validater(v interface{}) error {
+	name, ok := v.(string)
+	if !ok {
+		return NewErrWrongType("string", v)
+	}
+
+	first := name[0]
+	if !(first > 'A' && first < 'Z') {
+		return fmt.Errorf("in name supper checker, name frist letter should upper")
+	}
+
+	return nil
+
+}
+func TestCustomValidater(t *testing.T) {
+	AddValidater("upper", &NameUpperChecker{})
+
+	person := struct {
+		Name     string    `valid:"required;upper"`
+		Email    string    `valid:"required;email"`
+		Age      int       `valid:"-"`
+		Sex      int       ``
+		WebSites []*string `valid:"url"`
+	}{
+		Name:  "dave",
+		Email: "aa@aa.com",
+	}
+
+	validor := NewValidation()
+	res := validor.Validate(person)
+
+	if res {
+		t.Errorf("TestCustomValidater should failed\n")
+	}
+}
+
+func TestCustomValidaterConflict(t *testing.T) {
+	err := AddValidater("upper", &NameUpperChecker{})
+
+	// should replace
+	if err != nil {
+		t.Errorf("AddValidater should succeed. but got %s\n", err.Error())
+	}
+
+	err = AddValidater("email", &NameUpperChecker{})
+	if err != ErrValidaterExists {
+		t.Errorf("AddValidater should failed [ErrValidaterExists]. but got %s\n", err.Error())
 	}
 }
