@@ -7,7 +7,6 @@ import (
 func Trace(s string) string {
 	fmt.Println("Entering: ", s)
 	return s
-
 }
 
 func Untrace(s string) {
