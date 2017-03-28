@@ -66,3 +66,27 @@
 		case ch<-i:
 		}
 	}
+	
+## 6. Range on Closed channel
+
+  channel 关闭会导致range返回
+
+	 queue := make(chan string, 2)
+    queue <- "one"
+    queue <- "two"
+    close(queue)
+
+    for elem := range queue {
+        fmt.Println(elem)
+    }
+    
+    
+## 7. Check Closed Channel
+ 
+ 
+   	queue := make(chan int, 1)
+   	
+	value, ok := <-queue
+	if !ok {
+		fmt.Println("queue is closed")
+	}
