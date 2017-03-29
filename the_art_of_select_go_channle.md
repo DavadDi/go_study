@@ -1,4 +1,4 @@
-# Golang channle
+# Golang Channle
 
 ## 1. 队列满则保存到backend
 
@@ -45,7 +45,7 @@
 	}
 
 	
-## 4. 通过channel实现随机概率分发
+## 4. 通过Channel实现随机概率分发
 
 	select {
 			case b := <-backendMsgChan:
@@ -67,7 +67,7 @@
 		}
 	}
 	
-## 6. Range on Closed channel
+## 6. Range on Closed Channel
 
   channel 关闭会导致range返回
 
@@ -89,4 +89,15 @@
 	value, ok := <-queue
 	if !ok {
 		fmt.Println("queue is closed")
+	}
+	
+## 8. Select skip nil Channel
+
+	for {
+	    select {
+	    case x, ok := <-ch: // if ch is nil, just skip
+	        fmt.Println("ch1", x, ok)
+	        if !ok {
+	            ch = nil
+	        }
 	}
