@@ -7,10 +7,29 @@
 * 3. pkg中定义的var全局变量
 * 4. pkg中定义的init函数，可能有多个
 
-
-![int_seq](go_init_seq.png)
+![int_seq](http://www.do1618.com/wp-content/uploads/2017/05/go_init_seq.png)
 
 From: [Programming in Go]
+
+在 pkg 内，pkg level的 var 变量按照声明的顺序进行声明，但是要在依赖初始化变量的后面。
+
+初始化的顺序： d, b, c, a
+
+```go
+var (
+	a = c + b
+	b = f()
+	c = f()
+	d = 3
+)
+
+func f() int {
+	d++
+	return d
+}
+```
+
+Ref [Program_initialization_and_execution](https://golang.org/ref/spec#Program_initialization_and_execution)
 
 ## 2. go test程序的初始化
 
