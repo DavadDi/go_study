@@ -599,6 +599,44 @@ func (s *GenericAPIServer) installAPIResources(apiPrefix string, apiGroupInfo *A
 }
 ```
 
+getAPIGroupVersion: apiGroupInfo -> groupVersion
+
+```go
+func (s *GenericAPIServer) getAPIGroupVersion(apiGroupInfo *APIGroupInfo, groupVersion schema.GroupVersion, apiPrefix string) *genericapi.APIGroupVersion {
+	storage := make(map[string]rest.Storage)
+	for k, v := range apiGroupInfo.VersionedResourcesStorageMap[groupVersion.Version] {
+		storage[strings.ToLower(k)] = v
+	}
+	version := s.newAPIGroupVersion(apiGroupInfo, groupVersion)
+	version.Root = apiPrefix
+	version.Storage = storage
+	return version
+}
+
+func (s *GenericAPIServer) newAPIGroupVersion(apiGroupInfo *APIGroupInfo, groupVersion schema.GroupVersion) *genericapi.APIGroupVersion {
+	return &genericapi.APIGroupVersion{
+		GroupVersion:     groupVersion,
+		MetaGroupVersion: apiGroupInfo.MetaGroupVersion,
+
+		ParameterCodec:  apiGroupInfo.ParameterCodec,
+		Serializer:      apiGroupInfo.NegotiatedSerializer,
+		Creater:         apiGroupInfo.Scheme,
+		Convertor:       apiGroupInfo.Scheme,
+		UnsafeConvertor: runtime.UnsafeObjectConvertor(apiGroupInfo.Scheme),
+		Copier:          apiGroupInfo.Scheme,
+		Defaulter:       apiGroupInfo.Scheme,
+		Typer:           apiGroupInfo.Scheme,
+		SubresourceGroupVersionKind: apiGroupInfo.SubresourceGroupVersionKind,
+		Linker: apiGroupInfo.GroupMeta.SelfLinker,
+		Mapper: apiGroupInfo.GroupMeta.RESTMapper,
+
+		Admit:             s.admissionControl,
+		Context:           s.RequestContextMapper(),
+		MinRequestTimeout: s.minRequestTimeout,
+	}
+}
+```
+
 ### 3.3 APIGroupVersion InstallREST
 
 k8s.io/kubernetes/vendor/k8s.io/apiserver/pkg/endpoints/groupversion.go
@@ -622,7 +660,29 @@ func (g *APIGroupVersion) InstallREST(container *restful.Container) error {
 }
 ```
 
+### 3.4 Installer 装配车间
+
 k8s.io/kubernetes/vendor/k8s.io/apiserver/pkg/endpoints/installer.go
+
+生成 restful.WebService 对象
+```go
+// NewWebService creates a new restful webservice with the api installer's prefix and version.
+func (a *APIInstaller) NewWebService() *restful.WebService {
+	ws := new(restful.WebService)
+	ws.Path(a.prefix)
+	// a.prefix contains "prefix/group/version"
+	ws.Doc("API at " + a.prefix)
+	// Backwards compatibility, we accepted objects with empty content-type at V1.
+	// If we stop using go-restful, we can default empty content-type to application/json on an
+	// endpoint by endpoint basis
+	ws.Consumes("*/*")
+	mediaTypes, streamMediaTypes := negotiation.MediaTypesForSerializer(a.group.Serializer)
+	ws.Produces(append(mediaTypes, streamMediaTypes...)...)
+	ws.ApiVersion(a.group.GroupVersion.String())
+
+	return ws
+}
+```
 
 ```go
 // Installs handlers for API resources.
@@ -657,6 +717,8 @@ func (a *APIInstaller) Install(ws *restful.WebService) (apiResources []metav1.AP
 	return apiResources, errors
 }
 ```
+
+
 
 ```go
 func (a *APIInstaller) registerResourceHandlers(path string, storage rest.Storage, ws *restful.WebService, proxyHandler http.Handler) (*metav1.APIResource, error){
@@ -699,5 +761,44 @@ func (a *APIInstaller) registerResourceHandlers(path string, storage rest.Storag
 		
 		// ...
 }
+```
+
+```go
+func restfulGetResource(r rest.Getter, e rest.Exporter, scope handlers.RequestScope) restful.RouteFunction {
+	return func(req *restful.Request, res *restful.Response) {
+		handlers.GetResource(r, e, scope)(res.ResponseWriter, req.Request)
+	}
+}
+
+k8s.io/kubernetes/vendor/k8s.io/apiserver/pkg/endpoints/handlers/rest.go
+
+// GetResource returns a function that handles retrieving a single resource from a rest.Storage object.
+func GetResource(r rest.Getter, e rest.Exporter, scope RequestScope) http.HandlerFunc {
+	return getResourceHandler(scope,
+		func(ctx request.Context, name string, req *http.Request, trace *utiltrace.Trace) (runtime.Object, error) {
+			// check for export
+			options := metav1.GetOptions{}
+			if values := req.URL.Query(); len(values) > 0 {
+				exports := metav1.ExportOptions{}
+				if err := metainternalversion.ParameterCodec.DecodeParameters(values, scope.MetaGroupVersion, &exports); err != nil {
+					return nil, err
+				}
+				if exports.Export {
+					if e == nil {
+						return nil, errors.NewBadRequest(fmt.Sprintf("export of %q is not supported", scope.Resource.Resource))
+					}
+					return e.Export(ctx, name, exports)
+				}
+				if err := metainternalversion.ParameterCodec.DecodeParameters(values, scope.MetaGroupVersion, &options); err != nil {
+					return nil, err
+				}
+			}
+			if trace != nil {
+				trace.Step("About to Get from storage")
+			}
+			return r.Get(ctx, name, &options)
+		})
+}
+
 ```
 
