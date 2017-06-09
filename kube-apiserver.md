@@ -415,6 +415,7 @@ func Run(){
 
 Run() -> CreateKubeAPIServerConfig() -> BuildGenericConfig() -> s.Etcd.ApplyWithStorageFactoryTo(storageFactory, genericConfig) -> 其中 s *options.ServerRunOptions，
 
+vendor/k8s.io/apiserver/pkg/server/options/etcd.go
 ```go
 func (s *EtcdOptions) ApplyWithStorageFactoryTo(factory serverstorage.StorageFactory, c *server.Config) error {
 	c.RESTOptionsGetter = &storageFactoryRestOptionsFactory{Options: *s, StorageFactory: factory}
@@ -547,6 +548,360 @@ var Codecs = serializer.NewCodecFactory(Scheme)
 func NewCodecFactory(scheme *runtime.Scheme) CodecFactory {
 	serializers := newSerializersForScheme(scheme, json.DefaultMetaFactory)
 	return newCodecFactory(scheme, serializers)
+}
+```
+
+### Storage 补充
+
+```go
+	podStorage := podstore.NewStorage(
+		restOptionsGetter,
+		nodeStorage.KubeletConnectionInfo,
+		c.ProxyTransport,
+		podDisruptionClient,
+	)
+
+
+type Store struct {
+	// Copier is used to make some storage caching decorators work
+	Copier runtime.ObjectCopier
+
+	// NewFunc returns a new instance of the type this registry returns for a
+	// GET of a single object, e.g.:
+	//
+	// curl GET /apis/group/version/namespaces/my-ns/myresource/name-of-object
+	NewFunc func() runtime.Object
+
+	// NewListFunc returns a new list of the type this registry; it is the
+	// type returned when the resource is listed, e.g.:
+	//
+	// curl GET /apis/group/version/namespaces/my-ns/myresource
+	NewListFunc func() runtime.Object
+
+	// QualifiedResource is the pluralized name of the resource.
+	QualifiedResource schema.GroupResource
+
+	// KeyRootFunc returns the root etcd key for this resource; should not
+	// include trailing "/".  This is used for operations that work on the
+	// entire collection (listing and watching).
+	//
+	// KeyRootFunc and KeyFunc must be supplied together or not at all.
+	KeyRootFunc func(ctx genericapirequest.Context) string
+
+	// KeyFunc returns the key for a specific object in the collection.
+	// KeyFunc is called for Create/Update/Get/Delete. Note that 'namespace'
+	// can be gotten from ctx.
+	//
+	// KeyFunc and KeyRootFunc must be supplied together or not at all.
+	KeyFunc func(ctx genericapirequest.Context, name string) (string, error)
+
+	// ObjectNameFunc returns the name of an object or an error.
+	ObjectNameFunc func(obj runtime.Object) (string, error)
+
+	// TTLFunc returns the TTL (time to live) that objects should be persisted
+	// with. The existing parameter is the current TTL or the default for this
+	// operation. The update parameter indicates whether this is an operation
+	// against an existing object.
+	//
+	// Objects that are persisted with a TTL are evicted once the TTL expires.
+	TTLFunc func(obj runtime.Object, existing uint64, update bool) (uint64, error)
+
+	// PredicateFunc returns a matcher corresponding to the provided labels
+	// and fields. The SelectionPredicate returned should return true if the
+	// object matches the given field and label selectors.
+	PredicateFunc func(label labels.Selector, field fields.Selector) storage.SelectionPredicate
+
+	// EnableGarbageCollection affects the handling of Update and Delete
+	// requests. Enabling garbage collection allows finalizers to do work to
+	// finalize this object before the store deletes it.
+	//
+	// If any store has garbage collection enabled, it must also be enabled in
+	// the kube-controller-manager.
+	EnableGarbageCollection bool
+
+	// DeleteCollectionWorkers is the maximum number of workers in a single
+	// DeleteCollection call. Delete requests for the items in a collection
+	// are issued in parallel.
+	DeleteCollectionWorkers int
+
+	// Decorator is an optional exit hook on an object returned from the
+	// underlying storage. The returned object could be an individual object
+	// (e.g. Pod) or a list type (e.g. PodList). Decorator is intended for
+	// integrations that are above storage and should only be used for
+	// specific cases where storage of the value is not appropriate, since
+	// they cannot be watched.
+	Decorator ObjectFunc
+	// CreateStrategy implements resource-specific behavior during creation.
+	CreateStrategy rest.RESTCreateStrategy
+	// AfterCreate implements a further operation to run after a resource is
+	// created and before it is decorated, optional.
+	AfterCreate ObjectFunc
+	// UpdateStrategy implements resource-specific behavior during updates.
+	UpdateStrategy rest.RESTUpdateStrategy
+	// AfterUpdate implements a further operation to run after a resource is
+	// updated and before it is decorated, optional.
+	AfterUpdate ObjectFunc
+	// DeleteStrategy implements resource-specific behavior during deletion.
+	DeleteStrategy rest.RESTDeleteStrategy
+	// AfterDelete implements a further operation to run after a resource is
+	// deleted and before it is decorated, optional.
+	AfterDelete ObjectFunc
+	// ReturnDeletedObject determines whether the Store returns the object
+	// that was deleted. Otherwise, return a generic success status response.
+	ReturnDeletedObject bool
+	// ExportStrategy implements resource-specific behavior during export,
+	// optional. Exported objects are not decorated.
+	ExportStrategy rest.RESTExportStrategy
+
+	// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	// Storage is the interface for the underlying storage for the resource.
+	Storage storage.Interface
+	
+	
+	// Called to cleanup clients used by the underlying Storage; optional.
+	DestroyFunc func()
+	// Maximum size of the watch history cached in memory, in number of entries.
+	// This value is ignored if Storage is non-nil. Nil is replaced with a default value.
+	// A zero integer will disable caching.
+	WatchCacheSize *int
+}
+
+
+
+// NewStorage returns a RESTStorage object that will work against pods.
+func NewStorage(optsGetter generic.RESTOptionsGetter, k client.ConnectionInfoGetter, proxyTransport http.RoundTripper, podDisruptionBudgetClient policyclient.PodDisruptionBudgetsGetter) PodStorage {
+	store := &genericregistry.Store{
+		Copier:            api.Scheme,
+		NewFunc:           func() runtime.Object { return &api.Pod{} },
+		NewListFunc:       func() runtime.Object { return &api.PodList{} },
+		PredicateFunc:     pod.MatchPod,
+		QualifiedResource: api.Resource("pods"),
+		WatchCacheSize:    cachesize.GetWatchCacheSizeByResource("pods"),
+
+		CreateStrategy:      pod.Strategy,
+		UpdateStrategy:      pod.Strategy,
+		DeleteStrategy:      pod.Strategy,
+		ReturnDeletedObject: true,
+	}
+	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: pod.GetAttrs, TriggerFunc: pod.NodeNameTriggerFunc}
+	if err := store.CompleteWithOptions(options); err != nil {
+		panic(err) // TODO: Propagate error up
+	}
+
+	statusStore := *store
+	statusStore.UpdateStrategy = pod.StatusStrategy
+
+	return PodStorage{
+		Pod:         &REST{store, proxyTransport},
+		Binding:     &BindingREST{store: store},
+		Eviction:    newEvictionStorage(store, podDisruptionBudgetClient),
+		Status:      &StatusREST{store: &statusStore},
+		Log:         &podrest.LogREST{Store: store, KubeletConn: k},
+		Proxy:       &podrest.ProxyREST{Store: store, ProxyTransport: proxyTransport},
+		Exec:        &podrest.ExecREST{Store: store, KubeletConn: k},
+		Attach:      &podrest.AttachREST{Store: store, KubeletConn: k},
+		PortForward: &podrest.PortForwardREST{Store: store, KubeletConn: k},
+	}
+}
+
+// CompleteWithOptions updates the store with the provided options and
+// defaults common fields.
+func (e *Store) CompleteWithOptions(options *generic.StoreOptions) error {
+	if e.QualifiedResource.Empty() {
+		return fmt.Errorf("store %#v must have a non-empty qualified resource", e)
+	}
+	if e.NewFunc == nil {
+		return fmt.Errorf("store for %s must have NewFunc set", e.QualifiedResource.String())
+	}
+	if e.NewListFunc == nil {
+		return fmt.Errorf("store for %s must have NewListFunc set", e.QualifiedResource.String())
+	}
+	if (e.KeyRootFunc == nil) != (e.KeyFunc == nil) {
+		return fmt.Errorf("store for %s must set both KeyRootFunc and KeyFunc or neither", e.QualifiedResource.String())
+	}
+
+	var isNamespaced bool
+	switch {
+	case e.CreateStrategy != nil:
+		isNamespaced = e.CreateStrategy.NamespaceScoped()
+	case e.UpdateStrategy != nil:
+		isNamespaced = e.UpdateStrategy.NamespaceScoped()
+	default:
+		return fmt.Errorf("store for %s must have CreateStrategy or UpdateStrategy set", e.QualifiedResource.String())
+	}
+
+	if e.DeleteStrategy == nil {
+		return fmt.Errorf("store for %s must have DeleteStrategy set", e.QualifiedResource.String())
+	}
+
+	if options.RESTOptions == nil {
+		return fmt.Errorf("options for %s must have RESTOptions set", e.QualifiedResource.String())
+	}
+	if options.AttrFunc == nil {
+		return fmt.Errorf("options for %s must have AttrFunc set", e.QualifiedResource.String())
+	}
+
+	// 生成opt选项
+	opts, err := options.RESTOptions.GetRESTOptions(e.QualifiedResource)
+	if err != nil {
+		return err
+	}
+
+	// Resource prefix must come from the underlying factory
+	prefix := opts.ResourcePrefix
+	if !strings.HasPrefix(prefix, "/") {
+		prefix = "/" + prefix
+	}
+	if prefix == "/" {
+		return fmt.Errorf("store for %s has an invalid prefix %q", e.QualifiedResource.String(), opts.ResourcePrefix)
+	}
+
+	// Set the default behavior for storage key generation
+	if e.KeyRootFunc == nil && e.KeyFunc == nil {
+		if isNamespaced {
+			e.KeyRootFunc = func(ctx genericapirequest.Context) string {
+				return NamespaceKeyRootFunc(ctx, prefix)
+			}
+			e.KeyFunc = func(ctx genericapirequest.Context, name string) (string, error) {
+				return NamespaceKeyFunc(ctx, prefix, name)
+			}
+		} else {
+			e.KeyRootFunc = func(ctx genericapirequest.Context) string {
+				return prefix
+			}
+			e.KeyFunc = func(ctx genericapirequest.Context, name string) (string, error) {
+				return NoNamespaceKeyFunc(ctx, prefix, name)
+			}
+		}
+	}
+
+	// We adapt the store's keyFunc so that we can use it with the StorageDecorator
+	// without making any assumptions about where objects are stored in etcd
+	keyFunc := func(obj runtime.Object) (string, error) {
+		accessor, err := meta.Accessor(obj)
+		if err != nil {
+			return "", err
+		}
+
+		if isNamespaced {
+			return e.KeyFunc(genericapirequest.WithNamespace(genericapirequest.NewContext(), accessor.GetNamespace()), accessor.GetName())
+		}
+
+		return e.KeyFunc(genericapirequest.NewContext(), accessor.GetName())
+	}
+
+	triggerFunc := options.TriggerFunc
+	if triggerFunc == nil {
+		triggerFunc = storage.NoTriggerPublisher
+	}
+
+	if e.DeleteCollectionWorkers == 0 {
+		e.DeleteCollectionWorkers = opts.DeleteCollectionWorkers
+	}
+
+	e.EnableGarbageCollection = opts.EnableGarbageCollection
+
+	if e.ObjectNameFunc == nil {
+		e.ObjectNameFunc = func(obj runtime.Object) (string, error) {
+			accessor, err := meta.Accessor(obj)
+			if err != nil {
+				return "", err
+			}
+			return accessor.GetName(), nil
+		}
+	}
+
+	//func NewLegacyRESTStorage(restOptionsGetter generic.RESTOptionsGetter)
+	//  -- func NewStorage(optsGetter generic.RESTOptionsGetter
+	// 	   --  options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: pod.GetAttrs, TriggerFunc: pod.NodeNameTriggerFunc}
+	// 
+	/// !!!!! 设置 Storage
+	if e.Storage == nil {                          // RESTOptions = optsGetter
+		e.Storage, e.DestroyFunc = opts.Decorator( // opts, err := options.RESTOptions.GetRESTOptions(e.QualifiedResource)
+		                                           // 因为 options.RESTOptions = optsGetter = restOptionsGetter
+		                               // restOptionsGetter (3.1) = &storageFactoryRestOptionsFactory{Options: *s, StorageFactory: factory}
+		                               // vendor/k8s.io/apiserver/pkg/server/options/etcd.go
+		                               // func (s *EtcdOptions) ApplyWithStorageFactoryTo(factory serverstorage.StorageFactory, c *server.Config) 
+		                                           			e.Copier,
+			opts.StorageConfig,
+			e.WatchCacheSize,
+			e.NewFunc(),
+			prefix,
+			keyFunc,
+			e.NewListFunc,
+			options.AttrFunc,
+			triggerFunc,
+		)
+	}
+
+	return nil
+}
+
+// vendor/k8s.io/apiserver/pkg/server/options/etcd.go
+func (f *storageFactoryRestOptionsFactory) GetRESTOptions(resource schema.GroupResource) (generic.RESTOptions, error) {
+	storageConfig, err := f.StorageFactory.NewConfig(resource)
+	if err != nil {
+		return generic.RESTOptions{}, fmt.Errorf("unable to find storage destination for %v, due to %v", resource, err.Error())
+	}
+
+	ret := generic.RESTOptions{
+		StorageConfig:           storageConfig,
+		Decorator:               generic.UndecoratedStorage, // opts.Decorator ---------
+		DeleteCollectionWorkers: f.Options.DeleteCollectionWorkers,
+		EnableGarbageCollection: f.Options.EnableGarbageCollection,
+		ResourcePrefix:          f.StorageFactory.ResourcePrefix(resource),
+	}
+	if f.Options.EnableWatchCache {
+		ret.Decorator = genericregistry.StorageWithCacher(f.Options.DefaultWatchCacheSize)
+	}
+
+	return ret, nil
+}
+
+// k8s.io/kubernetes/vendor/k8s.io/apiserver/pkg/registry/generic/storage_decorator.go
+
+// UndecoratedStorage returns the given a new storage from the given config
+// without any decoration.
+func UndecoratedStorage(
+	copier runtime.ObjectCopier,
+	config *storagebackend.Config,
+	capacity *int,
+	objectType runtime.Object,
+	resourcePrefix string,
+	keyFunc func(obj runtime.Object) (string, error),
+	newListFunc func() runtime.Object,
+	getAttrsFunc storage.AttrFunc,
+	trigger storage.TriggerPublisherFunc) (storage.Interface, factory.DestroyFunc) {
+	return NewRawStorage(config)
+}
+
+// NewRawStorage creates the low level kv storage. This is a work-around for current
+// two layer of same storage interface.
+// TODO: Once cacher is enabled on all registries (event registry is special), we will remove this method.
+func NewRawStorage(config *storagebackend.Config) (storage.Interface, factory.DestroyFunc) {
+	s, d, err := factory.Create(*config)
+	if err != nil {
+		glog.Fatalf("Unable to create storage backend: config (%v), err (%v)", config, err)
+	}
+	return s, d
+}
+
+// vendor/k8s.io/apiserver/pkg/storage/storagebackend/factory/factory.go
+
+// Create creates a storage backend based on given config.
+func Create(c storagebackend.Config) (storage.Interface, DestroyFunc, error) {
+	switch c.Type {
+	case storagebackend.StorageTypeETCD2:
+		return newETCD2Storage(c)
+	case storagebackend.StorageTypeUnset, storagebackend.StorageTypeETCD3:
+		// TODO: We have the following features to implement:
+		// - Support secure connection by using key, cert, and CA files.
+		// - Honor "https" scheme to support secure connection in gRPC.
+		// - Support non-quorum read.
+		return newETCD3Storage(c)
+	default:
+		return nil, nil, fmt.Errorf("unknown storage type: %s", c.Type)
+	}
 }
 ```
 
@@ -898,6 +1253,99 @@ type Serializer interface {
 	Encoder
 	Decoder
 }
+```
+
+5. Storage
+
+k8s.io/kubernetes/pkg/registry/core/rest/storage_core.go
+
+```go
+func (c LegacyRESTStorageProvider) NewLegacyRESTStorage(restOptionsGetter generic.RESTOptionsGetter) (LegacyRESTStorage, genericapiserver.APIGroupInfo, error){
+
+	podStorage := podstore.NewStorage(
+		restOptionsGetter,
+		nodeStorage.KubeletConnectionInfo,
+		c.ProxyTransport,
+		podDisruptionClient,
+	)
+	
+       // ...
+     
+   restStorageMap := map[string]rest.Storage{
+		"pods":             podStorage.Pod,
+		"pods/attach":      podStorage.Attach,
+		"pods/status":      podStorage.Status,
+		
+		// ...
+
+		"nodes":        nodeStorage.Node,
+		"nodes/status": nodeStorage.Status,
+		"nodes/proxy":  nodeStorage.Proxy,
+
+		// ...
+	}
+	
+	apiGroupInfo.VersionedResourcesStorageMap["v1"] = restStorageMap
+	
+}
+```
+
+```go
+// Storage is a generic interface for RESTful storage services.
+// Resources which are exported to the RESTful API of apiserver need to implement this interface. It is expected
+// that objects may implement any of the below interfaces.
+type Storage interface {
+	// New returns an empty object that can be used with Create and Update after request data has been put into it.
+	// This object must be a pointer type for use with Codec.DecodeInto([]byte, runtime.Object)
+	New() runtime.Object
+}
+```
+
+k8s.io/kubernetes/pkg/registry/core/pod/storage/storage.go
+
+```go
+// REST implements a RESTStorage for pods
+type REST struct {
+	*genericregistry.Store  // struct, k8s.io/kubernetes/vendor/k8s.io/apiserver/pkg/registry/generic/registry/store.go
+	proxyTransport http.RoundTripper
+}
+
+// NewStorage returns a RESTStorage object that will work against pods.
+func NewStorage(optsGetter generic.RESTOptionsGetter, k client.ConnectionInfoGetter, proxyTransport http.RoundTripper, podDisruptionBudgetClient policyclient.PodDisruptionBudgetsGetter) PodStorage {
+	store := &genericregistry.Store{
+		Copier:            api.Scheme,
+		NewFunc:           func() runtime.Object { return &api.Pod{} },
+		NewListFunc:       func() runtime.Object { return &api.PodList{} },
+		PredicateFunc:     pod.MatchPod,
+		QualifiedResource: api.Resource("pods"),
+		WatchCacheSize:    cachesize.GetWatchCacheSizeByResource("pods"),
+
+		CreateStrategy:      pod.Strategy,
+		UpdateStrategy:      pod.Strategy,
+		DeleteStrategy:      pod.Strategy,
+		ReturnDeletedObject: true,
+	}
+	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: pod.GetAttrs, TriggerFunc: pod.NodeNameTriggerFunc}
+	if err := store.CompleteWithOptions(options); err != nil {
+		panic(err) // TODO: Propagate error up
+	}
+
+	statusStore := *store
+	statusStore.UpdateStrategy = pod.StatusStrategy
+
+	return PodStorage{
+		Pod:         &REST{store, proxyTransport},
+		Binding:     &BindingREST{store: store},
+		Eviction:    newEvictionStorage(store, podDisruptionBudgetClient),
+		Status:      &StatusREST{store: &statusStore},
+		Log:         &podrest.LogREST{Store: store, KubeletConn: k},
+		Proxy:       &podrest.ProxyREST{Store: store, ProxyTransport: proxyTransport},
+		Exec:        &podrest.ExecREST{Store: store, KubeletConn: k},
+		Attach:      &podrest.AttachREST{Store: store, KubeletConn: k},
+		PortForward: &podrest.PortForwardREST{Store: store, KubeletConn: k},
+	}
+}
+
 ```
 
 
