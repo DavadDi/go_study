@@ -59,7 +59,6 @@ k8s.io/kubernetes/pkg/master/master.go  -> k8s.io/kubernetes/vendor/k8s.io/apise
 // Master contains state for a Kubernetes cluster master/api server.
 type Master struct {
 	GenericAPIServer *genericapiserver.GenericAPIServer
-
 	ClientCARegistrationHook ClientCARegistrationHook
 }
 ```
@@ -161,6 +160,7 @@ type GenericAPIServer struct {
 
 	// storage contains the RESTful endpoints exposed by this GenericAPIServer
 	storage map[string]rest.Storage
+	// 在函数 GenericAPIServer::getAPIGroupVersion 进行填充
 	
 	// ....
 	
@@ -186,8 +186,9 @@ func (c completedConfig) New(name string, delegationTarget DelegationTarget) (*G
 	apiServerHandler := NewAPIServerHandler(name, c.RequestContextMapper, c.Serializer, handlerChainBuilder, delegationTarget.UnprotectedHandler())
 
 	s := &GenericAPIServer{
-	   // ...
+		// ...
 		Handler: apiServerHandler,
+		// ...
 	}
 
 	genericApiServerHookName := "generic-apiserver-start-informers"
@@ -198,9 +199,6 @@ func (c completedConfig) New(name string, delegationTarget DelegationTarget) (*G
 		})
 	}
 	
-
-	s.listedPathProvider = routes.ListedPathProviders{s.listedPathProvider, delegationTarget}
-
 	// install Index/Swagger/Mertircs/Discorvy 
 	installAPI(s, c.Config)
 	
@@ -283,4 +281,61 @@ type APIServerHandler struct {
 	Director http.Handler
 }
 
+```
+
+
+### 2.3 Run
+
+```go
+func Run(){
+	// ...
+	aggregatorServer.GenericAPIServer.PrepareRun().Run(stopCh)
+}
+
+type preparedGenericAPIServer struct {
+	*GenericAPIServer
+}
+
+
+// Run spawns the secure http server. It only returns if stopCh is closed
+// or the secure port cannot be listened on initially.
+func (s preparedGenericAPIServer) Run(stopCh <-chan struct{}) error {
+	err := s.NonBlockingRun(stopCh)
+	//...
+}
+
+func (s preparedGenericAPIServer) NonBlockingRun(stopCh <-chan struct{}) error {
+	// Use an internal stop channel to allow cleanup of the listeners on error.
+	internalStopCh := make(chan struct{})
+
+	if s.SecureServingInfo != nil && s.Handler != nil {
+		if err := s.serveSecurely(internalStopCh); err != nil 
+		//....
+}
+
+
+// serveSecurely runs the secure http server. It fails only if certificates cannot
+// be loaded or the initial listen call fails. The actual server loop (stoppable by closing
+// stopCh) runs in a go routine, i.e. serveSecurely does not block.
+func (s *GenericAPIServer) serveSecurely(stopCh <-chan struct{}) error {
+	secureServer := &http.Server{
+		Addr:           s.SecureServingInfo.BindAddress,
+		Handler:        s.Handler, // Handler *APIServerHandler
+		MaxHeaderBytes: 1 << 20,
+	
+	    // ...
+	    
+	   s.effectiveSecurePort, err = RunServer(secureServer, s.SecureServingInfo.BindNetwork, stopCh)
+	   
+	   // ...
+}
+
+
+// RunServer listens on the given port, then spawns a go-routine continuously serving
+// until the stopCh is closed. The port is returned. This function does not block.
+func RunServer(server *http.Server, network string, stopCh <-chan struct{}) (int, error) {
+		// ...
+		err := server.Serve(listener)
+		//....
+}
 ```
