@@ -889,6 +889,18 @@ type Scheme struct {
 ```
 
 
+k8s.io/kubernetes/vendor/k8s.io/apimachinery/pkg/runtime/serializer
+
+定义了 En/Decoder 包括 json/protobuf/yaml 等
+
+```go
+type Serializer interface {
+	Encoder
+	Decoder
+}
+```
+
+
 
 
 
