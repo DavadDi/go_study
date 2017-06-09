@@ -160,7 +160,7 @@ type GenericAPIServer struct {
 
 	// storage contains the RESTful endpoints exposed by this GenericAPIServer
 	storage map[string]rest.Storage
-	// 在函数 GenericAPIServer::getAPIGroupVersion 进行填充
+	// 未在 GenericAPIServer 函数中看到使用？ 需要进一步确认
 	
 	// ....
 	
@@ -187,7 +187,7 @@ func (c completedConfig) New(name string, delegationTarget DelegationTarget) (*G
 
 	s := &GenericAPIServer{
 		// ...
-		Handler: apiServerHandler,
+		Handler: apiServerHandler, // 为http提供服务总的入口， director -> {nogorustful, gorestful}
 		// ...
 	}
 
@@ -320,7 +320,7 @@ func (s preparedGenericAPIServer) NonBlockingRun(stopCh <-chan struct{}) error {
 func (s *GenericAPIServer) serveSecurely(stopCh <-chan struct{}) error {
 	secureServer := &http.Server{
 		Addr:           s.SecureServingInfo.BindAddress,
-		Handler:        s.Handler, // Handler *APIServerHandler
+		Handler:        s.Handler, // GenericAPIServer { Handler *APIServerHandler }
 		MaxHeaderBytes: 1 << 20,
 	
 	    // ...
