@@ -122,7 +122,16 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 }
 ```
 
-### 1.3 疑问
+### 1.3 总结
+	
+完成的主要流程：
+
+* 从配置文件完成配置结构的转换
+* 创建 Master对象，包括 GenericAPIServer，调用 InstallLegacyAPI 和 InstallAPIs 完成相关API处理加载；
+* 创建apiExtensionsServer；创建aggregatorServer
+* 完成 insecureServer和aggregatorServer启动
+
+### 1.4 其他
 
 sharedInformers 这个作用？
 
