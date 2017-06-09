@@ -1,6 +1,8 @@
 # K8S kube-apiserver 源码层次分析
 
 ## 1. Run入口
+初步代码在 cmd/kube-apiserver 和 pkg/master/master.go
+
 k8s.io/kubernetes/cmd/kube-apiserver/apiserver.go
 
 ```go
@@ -119,12 +121,54 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 }
 ```
 
+### 疑问
 
-### Master 之 GenericAPIServer 对象
+sharedInformers 这个作用？
+
+k8s.io/kubernetes/cmd/kube-apiserver/app/server.go
+
+```go
+
+func BuildGenericConfig(s *options.ServerRunOptions) (*genericapiserver.Config, informers.SharedInformerFactory, *kubeserver.InsecureServingInfo, error) {
+	/// ...
+	sharedInformers := informers.NewSharedInformerFactory(client, 10*time.Minute)
+	/// ...
+}
+
+
+func NewSharedInformerFactory(client internalclientset.Interface, defaultResync time.Duration) SharedInformerFactory {
+	return &sharedInformerFactory{
+		client:           client,
+		defaultResync:    defaultResync,
+		informers:        make(map[reflect.Type]cache.SharedIndexInformer),
+		startedInformers: make(map[reflect.Type]bool),
+	}
+}
+```
+
+## 2. GenericAPIServer
+
+代码主体已经转移到了 k8s.io/apiserver/pkg/server/ 这个pkg
+
+GenericAPIServer 中重要的字段
+
+```go
+type GenericAPIServer struct {
+
+	// storage contains the RESTful endpoints exposed by this GenericAPIServer
+	storage map[string]rest.Storage
+	
+	// ....
+	
+	// "Outputs"
+	// Handler holdes the handlers being used by this API server
+	Handler *APIServerHandler
+}
+```
 
 k8s.io/kubernetes/vendor/k8s.io/apiserver/pkg/server/config.go
 
-```
+```go
 // New creates a new server which logically combines the handling chain with the passed server.
 // name is used to differentiate for logging.  The handler chain in particular can be difficult as it starts delgating.
 func (c completedConfig) New(name string, delegationTarget DelegationTarget) (*GenericAPIServer, error) {
@@ -160,6 +204,8 @@ func (c completedConfig) New(name string, delegationTarget DelegationTarget) (*G
 }
 
 ```
+
+k8s.io/kubernetes/vendor/k8s.io/apiserver/pkg/server/handler.go
 
 ```go
 func NewAPIServerHandler(name string, contextMapper request.RequestContextMapper, s runtime.NegotiatedSerializer, handlerChainBuilder HandlerChainBuilderFn, notFoundHandler http.Handler) *APIServerHandler {
@@ -231,29 +277,4 @@ type APIServerHandler struct {
 	Director http.Handler
 }
 
-```
-
-### 疑问
-
-sharedInformers 这个作用？
-
-k8s.io/kubernetes/cmd/kube-apiserver/app/server.go
-
-```go
-
-func BuildGenericConfig(s *options.ServerRunOptions) (*genericapiserver.Config, informers.SharedInformerFactory, *kubeserver.InsecureServingInfo, error) {
-	/// ...
-	sharedInformers := informers.NewSharedInformerFactory(client, 10*time.Minute)
-	/// ...
-}
-
-
-func NewSharedInformerFactory(client internalclientset.Interface, defaultResync time.Duration) SharedInformerFactory {
-	return &sharedInformerFactory{
-		client:           client,
-		defaultResync:    defaultResync,
-		informers:        make(map[reflect.Type]cache.SharedIndexInformer),
-		startedInformers: make(map[reflect.Type]bool),
-	}
-}
 ```
