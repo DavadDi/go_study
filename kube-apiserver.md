@@ -348,3 +348,204 @@ func RunServer(server *http.Server, network string, stopCh <-chan struct{}) (int
 		//....
 }
 ```
+
+
+## 3. InstallLegacyAPI 流程
+
+LegacyAPI 主要是对于 APIServer Core核心部分的相关处理；registry相关的代码目录为 **k8s.io/kubernetes/pkg/registry/core **
+
+
+```go
+func Run(){
+	kubeAPIServerConfig, sharedInformers, insecureServingOptions, err := CreateKubeAPIServerConfig(runOptions)
+
+func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget) (*Master, error) {	
+	// install legacy rest storage
+	if c.APIResourceConfigSource.AnyResourcesForVersionEnabled(apiv1.SchemeGroupVersion) {
+		legacyRESTStorageProvider := corerest.LegacyRESTStorageProvider{
+			StorageFactory:       c.StorageFactory,
+			ProxyTransport:       c.ProxyTransport,
+			KubeletClientConfig:  c.KubeletClientConfig,
+			EventTTL:             c.EventTTL,
+			ServiceIPRange:       c.ServiceIPRange,
+			ServiceNodePortRange: c.ServiceNodePortRange,
+			LoopbackClientConfig: c.GenericConfig.LoopbackClientConfig,
+		}
+
+		// 装载pod、service的资源操作的REST api,
+		// RESTOptionsGetter is used to construct RESTStorage types via the generic registry.
+		m.InstallLegacyAPI(c.Config, c.Config.GenericConfig.RESTOptionsGetter, legacyRESTStorageProvider)
+	}
+}
+```
+
+调用参数： master.Config  master.Config.GenericConfig.RESTOptionsGetter  legacyRESTStorageProvider
+
+```go
+
+RESTOptionsGetter genericregistry.RESTOptionsGetter
+
+// 从后端存储获取保存的相关信息
+type RESTOptionsGetter interface {
+	GetRESTOptions(resource schema.GroupResource) (RESTOptions, error)
+}
+
+type LegacyRESTStorageProvider struct {
+	StorageFactory serverstorage.StorageFactory
+	// Used for custom proxy dialing, and proxy TLS options
+	ProxyTransport      http.RoundTripper
+	KubeletClientConfig kubeletclient.KubeletClientConfig
+	EventTTL            time.Duration
+
+	// ServiceIPRange is used to build cluster IPs for discovery.
+	ServiceIPRange       net.IPNet
+	ServiceNodePortRange utilnet.PortRange
+
+	LoopbackClientConfig *restclient.Config
+}
+```
+
+master.Config.GenericConfig.RESTOptionsGetter 的设置的来源：
+
+Run() -> CreateKubeAPIServerConfig() -> BuildGenericConfig() -> s.Etcd.ApplyWithStorageFactoryTo(storageFactory, genericConfig) -> 其中 s *options.ServerRunOptions，
+
+```go
+func (s *EtcdOptions) ApplyWithStorageFactoryTo(factory serverstorage.StorageFactory, c *server.Config) error {
+	c.RESTOptionsGetter = &storageFactoryRestOptionsFactory{Options: *s, StorageFactory: factory}
+	return nil
+}
+```
+
+ 
+```go
+func (m *Master) InstallLegacyAPI(c *Config, restOptionsGetter generic.RESTOptionsGetter, legacyRESTStorageProvider corerest.LegacyRESTStorageProvider) {
+	legacyRESTStorage, apiGroupInfo, err := legacyRESTStorageProvider.NewLegacyRESTStorage(restOptionsGetter)
+
+	if c.EnableCoreControllers {
+		coreClient := coreclient.NewForConfigOrDie(c.GenericConfig.LoopbackClientConfig)
+		bootstrapController := c.NewBootstrapController(legacyRESTStorage, coreClient, coreClient)
+		if err := m.GenericAPIServer.AddPostStartHook("bootstrap-controller", bootstrapController.PostStartHook); err != nil {
+			glog.Fatalf("Error registering PostStartHook %q: %v", "bootstrap-controller", err)
+		}
+	}
+
+	if err := m.GenericAPIServer.InstallLegacyAPIGroup(genericapiserver.DefaultLegacyAPIPrefix, &apiGroupInfo); err != nil {
+		glog.Fatalf("Error in registering group versions: %v", err)
+	}
+}
+
+```
+
+传入参数：
+
+
+
+准备工作，调用 legacyRESTStorageProvider.NewLegacyRESTStorage 生成相关的数据。
+
+k8s.io/kubernetes/pkg/registry/core/rest/storage_core.go
+
+```go
+// k8s.io/kubernetes/pkg/registry/core/rest/storage_core.go
+type LegacyRESTStorage struct {
+	ServiceClusterIPAllocator rangeallocation.RangeRegistry
+	ServiceNodePortAllocator  rangeallocation.RangeRegistry
+}
+
+
+// k8s.io/kubernetes/vendor/k8s.io/apiserver/pkg/server/genericapiserver.go
+// Info about an API group.
+type APIGroupInfo struct {
+	GroupMeta apimachinery.GroupMeta
+	// Info about the resources in this group. Its a map from version to resource to the storage.
+	VersionedResourcesStorageMap map[string]map[string]rest.Storage
+	
+	// OptionsExternalVersion controls the APIVersion used for common objects in the
+	// schema like api.Status, api.DeleteOptions, and metav1.ListOptions. Other implementors may
+	// define a version "v1beta1" but want to use the Kubernetes "v1" internal objects.
+	// If nil, defaults to groupMeta.GroupVersion.
+	// TODO: Remove this when https://github.com/kubernetes/kubernetes/issues/19018 is fixed.
+	
+	OptionsExternalVersion *schema.GroupVersion // Group, Version string
+	// MetaGroupVersion defaults to "meta.k8s.io/v1" and is the scheme group version used to decode
+	// common API implementations like ListOptions. Future changes will allow this to vary by group
+	// version (for when the inevitable meta/v2 group emerges).
+	MetaGroupVersion *schema.GroupVersion
+
+	// Scheme includes all of the types used by this group and how to convert between them (or
+	// to convert objects from outside of this group that are accepted in this API).
+	// TODO: replace with interfaces
+	Scheme *runtime.Scheme
+	
+	// NegotiatedSerializer controls how this group encodes and decodes data
+	NegotiatedSerializer runtime.NegotiatedSerializer
+	
+	// ParameterCodec performs conversions for query parameters passed to API calls
+	ParameterCodec runtime.ParameterCodec
+
+	// SubresourceGroupVersionKind contains the GroupVersionKind overrides for each subresource that is
+	// accessible from this API group version. The GroupVersionKind is that of the external version of
+	// the subresource. The key of this map should be the path of the subresource. The keys here should
+	// match the keys in the Storage map above for subresources.
+	SubresourceGroupVersionKind map[string]schema.GroupVersionKind
+}
+
+func (c LegacyRESTStorageProvider) NewLegacyRESTStorage(restOptionsGetter generic.RESTOptionsGetter) (LegacyRESTStorage, genericapiserver.APIGroupInfo, error) {
+	apiGroupInfo := genericapiserver.APIGroupInfo{
+		GroupMeta:                    *api.Registry.GroupOrDie(api.GroupName),
+		VersionedResourcesStorageMap: map[string]map[string]rest.Storage{},
+		Scheme:                      api.Scheme, // runtime.NewScheme()
+		ParameterCodec:              api.ParameterCodec, // runtime.NewParameterCodec(Scheme) 		NegotiatedSerializer:        api.Codecs, // serializer.NewCodecFactory(Scheme), 
+												        // Codecs provides access to encoding and decoding for the scheme
+
+		SubresourceGroupVersionKind: map[string]schema.GroupVersionKind{},
+		// type GroupVersionKind struct { Group,Version,Kind  string}
+	}
+
+	restStorage := LegacyRESTStorage{}
+	
+	// ...
+
+	podStorage := podstore.NewStorage(
+		restOptionsGetter,
+		nodeStorage.KubeletConnectionInfo,
+		c.ProxyTransport,
+		podDisruptionClient,
+	)
+	
+	// ...
+
+	controllerStorage := controllerstore.NewStorage(restOptionsGetter)
+
+	serviceRest := service.NewStorage(serviceRegistry, endpointRegistry, ServiceClusterIPAllocator, ServiceNodePortAllocator, c.ProxyTransport)
+
+	restStorageMap := map[string]rest.Storage{
+		"pods":             podStorage.Pod,
+		"pods/attach":      podStorage.Attach,
+		// ...
+		"nodes":        nodeStorage.Node,
+		"nodes/status": nodeStorage.Status,
+		"nodes/proxy":  nodeStorage.Proxy,
+
+		"events": eventStorage,
+		// ...
+		"configMaps": configMapStorage,
+		"componentStatuses": componentstatus.NewStorage(componentStatusStorage{c.StorageFactory}.serversToValidate),
+	}
+
+	apiGroupInfo.VersionedResourcesStorageMap["v1"] = restStorageMap
+	return restStorage, apiGroupInfo, nil
+}
+```
+
+codec:
+k8s.io/kubernetes/vendor/k8s.io/apimachinery/pkg/runtime/serializer/codec_factory.go
+
+```go
+var Codecs = serializer.NewCodecFactory(Scheme)
+
+func NewCodecFactory(scheme *runtime.Scheme) CodecFactory {
+	serializers := newSerializersForScheme(scheme, json.DefaultMetaFactory)
+	return newCodecFactory(scheme, serializers)
+}
+```
+
