@@ -1,6 +1,8 @@
 # K8S kube-apiserver 源码层次分析
 
-## 1. Run入口
+## 1. Master
+
+### 1.1 Run入口
 初步代码在 cmd/kube-apiserver 和 pkg/master/master.go
 
 k8s.io/kubernetes/cmd/kube-apiserver/apiserver.go
@@ -49,7 +51,7 @@ func Run(runOptions *options.ServerRunOptions, stopCh <-chan struct{}) error {
 }
 ```
 
-### Run 之 CreateKubeAPIServer
+### 1.2 CreateKubeAPIServer
 
 k8s.io/kubernetes/pkg/master/master.go  -> k8s.io/kubernetes/vendor/k8s.io/apiserver/pkg/server
 
@@ -121,7 +123,7 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 }
 ```
 
-### 疑问
+### 1.3 疑问
 
 sharedInformers 这个作用？
 
@@ -150,6 +152,8 @@ func NewSharedInformerFactory(client internalclientset.Interface, defaultResync 
 
 代码主体已经转移到了 k8s.io/apiserver/pkg/server/ 这个pkg
 
+### 2.1 GenericAPIServer结构
+
 GenericAPIServer 中重要的字段
 
 ```go
@@ -165,6 +169,8 @@ type GenericAPIServer struct {
 	Handler *APIServerHandler
 }
 ```
+
+### 2.2 GenericAPIServer创建
 
 k8s.io/kubernetes/vendor/k8s.io/apiserver/pkg/server/config.go
 
