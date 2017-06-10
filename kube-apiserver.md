@@ -812,7 +812,7 @@ func (s *GenericAPIServer) newAPIGroupVersion(apiGroupInfo *APIGroupInfo, groupV
 }
 ```
 
-### 3.3 APIGroupVersion InstallREST
+### 3.4 APIGroupVersion InstallREST
 
 k8s.io/kubernetes/vendor/k8s.io/apiserver/pkg/endpoints/groupversion.go
 
@@ -835,7 +835,7 @@ func (g *APIGroupVersion) InstallREST(container *restful.Container) error {
 }
 ```
 
-### 3.4 Installer 装配车间
+### 3.5 Installer 装配车间
 
 k8s.io/kubernetes/vendor/k8s.io/apiserver/pkg/endpoints/installer.go
 
