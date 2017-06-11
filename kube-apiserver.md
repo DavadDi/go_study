@@ -981,6 +981,8 @@ func GetResource(r rest.Getter, e rest.Exporter, scope RequestScope) http.Handle
 
 章节3中的 APIGroupVersion 实现了多版本管理，但为了实现多版本结构体之间的转换，k8s 采用 runtime.Scheme 进行各版本结构体的转换。
 
+k8s.io/kubernetes/pkg/api/register.go
+
 ```go
 // NewScheme creates a new Scheme. This scheme is pluggable by default.
 func NewScheme() *Scheme {
@@ -1010,6 +1012,8 @@ func NewScheme() *Scheme {
 	return s
 }
 ```
+
+k8s.io/kubernetes/staging/src/k8s.io/apimachinery/pkg/runtime/scheme.go
 
 ```go
 // Scheme defines methods for serializing and deserializing API objects, a type
@@ -1063,8 +1067,128 @@ type Scheme struct {
 
 ```
 
+k8s.io/kubernetes/pkg/api/register.go
 
-k8s.io/kubernetes/vendor/k8s.io/apimachinery/pkg/runtime/serializer
+```go
+
+var (
+	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes)
+	AddToScheme   = SchemeBuilder.AddToScheme
+)
+
+func addKnownTypes(scheme *runtime.Scheme) error {
+	if err := scheme.AddIgnoredConversionType(&metav1.TypeMeta{}, &metav1.TypeMeta{}); err != nil {
+		return err
+	}
+	scheme.AddKnownTypes(SchemeGroupVersion,
+		&Pod{},
+		&PodList{},
+		&PodStatusResult{},
+		&PodTemplate{},
+		&PodTemplateList{},
+		&ReplicationControllerList{},
+		&ReplicationController{},
+		&ServiceList{},
+		&Service{},
+		&ServiceProxyOptions{},
+		&NodeList{},
+		&Node{},
+		&NodeProxyOptions{},
+		&Endpoints{},
+		&EndpointsList{},
+		&Binding{},
+		&Event{},
+		&EventList{},
+		&List{},
+		&LimitRange{},
+		&LimitRangeList{},
+		&ResourceQuota{},
+		&ResourceQuotaList{},
+		&Namespace{},
+		&NamespaceList{},
+		&ServiceAccount{},
+		&ServiceAccountList{},
+		&Secret{},
+		&SecretList{},
+		&PersistentVolume{},
+		&PersistentVolumeList{},
+		&PersistentVolumeClaim{},
+		&PersistentVolumeClaimList{},
+		&PodAttachOptions{},
+		&PodLogOptions{},
+		&PodExecOptions{},
+		&PodPortForwardOptions{},
+		&PodProxyOptions{},
+		&ComponentStatus{},
+		&ComponentStatusList{},
+		&SerializedReference{},
+		&RangeAllocation{},
+		&ConfigMap{},
+		&ConfigMapList{},
+	)
+
+	// Register Unversioned types under their own special group
+	scheme.AddUnversionedTypes(Unversioned,
+		&metav1.Status{},
+		&metav1.APIVersions{},
+		&metav1.APIGroupList{},
+		&metav1.APIGroup{},
+		&metav1.APIResourceList{},
+	)
+	return nil
+}
+
+// AddKnownTypes registers all types passed in 'types' as being members of version 'version'.
+// All objects passed to types should be pointers to structs. The name that go reports for
+// the struct becomes the "kind" field when encoding. Version may not be empty - use the
+// APIVersionInternal constant if you have a type that does not have a formal version.
+func (s *Scheme) AddKnownTypes(gv schema.GroupVersion, types ...Object) {
+	for _, obj := range types {
+		t := reflect.TypeOf(obj)
+		if t.Kind() != reflect.Ptr {
+			panic("All types must be pointers to structs.")
+		}
+		t = t.Elem()
+		s.AddKnownTypeWithName(gv.WithKind(t.Name()), obj)
+	}
+}
+
+
+// AddKnownTypeWithName is like AddKnownTypes, but it lets you specify what this type should
+// be encoded as. Useful for testing when you don't want to make multiple packages to define
+// your structs. Version may not be empty - use the APIVersionInternal constant if you have a
+// type that does not have a formal version.
+func (s *Scheme) AddKnownTypeWithName(gvk schema.GroupVersionKind, obj Object) {
+	t := reflect.TypeOf(obj)
+	if len(gvk.Version) == 0 {
+		panic(fmt.Sprintf("version is required on all types: %s %v", gvk, t))
+	}
+	if t.Kind() != reflect.Ptr {
+		panic("All types must be pointers to structs.")
+	}
+	t = t.Elem()
+	if t.Kind() != reflect.Struct {
+		panic("All types must be pointers to structs.")
+	}
+
+	if oldT, found := s.gvkToType[gvk]; found && oldT != t {
+		panic(fmt.Sprintf("Double registration of different types for %v: old=%v.%v, new=%v.%v", gvk, oldT.PkgPath(), oldT.Name(), t.PkgPath(), t.Name()))
+	}
+
+	s.gvkToType[gvk] = t
+
+	for _, existingGvk := range s.typeToGVK[t] {
+		if existingGvk == gvk {
+			return
+		}
+	}
+	s.typeToGVK[t] = append(s.typeToGVK[t], gvk)
+}
+
+```
+
+
+vendor/k8s.io/apimachinery/pkg/runtime/serializer
 
 定义了 En/Decoder 包括 json/protobuf/yaml 等
 
@@ -1073,99 +1197,6 @@ type Serializer interface {
 	Encoder
 	Decoder
 }
-```
-
-5. Storage
-
-k8s.io/kubernetes/pkg/registry/core/rest/storage_core.go
-
-```go
-func (c LegacyRESTStorageProvider) NewLegacyRESTStorage(restOptionsGetter generic.RESTOptionsGetter) (LegacyRESTStorage, genericapiserver.APIGroupInfo, error){
-
-	podStorage := podstore.NewStorage(
-		restOptionsGetter,
-		nodeStorage.KubeletConnectionInfo,
-		c.ProxyTransport,
-		podDisruptionClient,
-	)
-	
-       // ...
-     
-   restStorageMap := map[string]rest.Storage{
-		"pods":             podStorage.Pod,
-		"pods/attach":      podStorage.Attach,
-		"pods/status":      podStorage.Status,
-		
-		// ...
-
-		"nodes":        nodeStorage.Node,
-		"nodes/status": nodeStorage.Status,
-		"nodes/proxy":  nodeStorage.Proxy,
-
-		// ...
-	}
-	
-	apiGroupInfo.VersionedResourcesStorageMap["v1"] = restStorageMap
-	
-}
-```
-
-```go
-// Storage is a generic interface for RESTful storage services.
-// Resources which are exported to the RESTful API of apiserver need to implement this interface. It is expected
-// that objects may implement any of the below interfaces.
-type Storage interface {
-	// New returns an empty object that can be used with Create and Update after request data has been put into it.
-	// This object must be a pointer type for use with Codec.DecodeInto([]byte, runtime.Object)
-	New() runtime.Object
-}
-```
-
-k8s.io/kubernetes/pkg/registry/core/pod/storage/storage.go
-
-```go
-// REST implements a RESTStorage for pods
-type REST struct {
-	*genericregistry.Store  // struct, k8s.io/kubernetes/vendor/k8s.io/apiserver/pkg/registry/generic/registry/store.go
-	proxyTransport http.RoundTripper
-}
-
-// NewStorage returns a RESTStorage object that will work against pods.
-func NewStorage(optsGetter generic.RESTOptionsGetter, k client.ConnectionInfoGetter, proxyTransport http.RoundTripper, podDisruptionBudgetClient policyclient.PodDisruptionBudgetsGetter) PodStorage {
-	store := &genericregistry.Store{
-		Copier:            api.Scheme,
-		NewFunc:           func() runtime.Object { return &api.Pod{} },
-		NewListFunc:       func() runtime.Object { return &api.PodList{} },
-		PredicateFunc:     pod.MatchPod,
-		QualifiedResource: api.Resource("pods"),
-		WatchCacheSize:    cachesize.GetWatchCacheSizeByResource("pods"),
-
-		CreateStrategy:      pod.Strategy,
-		UpdateStrategy:      pod.Strategy,
-		DeleteStrategy:      pod.Strategy,
-		ReturnDeletedObject: true,
-	}
-	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: pod.GetAttrs, TriggerFunc: pod.NodeNameTriggerFunc}
-	if err := store.CompleteWithOptions(options); err != nil {
-		panic(err) // TODO: Propagate error up
-	}
-
-	statusStore := *store
-	statusStore.UpdateStrategy = pod.StatusStrategy
-
-	return PodStorage{
-		Pod:         &REST{store, proxyTransport},
-		Binding:     &BindingREST{store: store},
-		Eviction:    newEvictionStorage(store, podDisruptionBudgetClient),
-		Status:      &StatusREST{store: &statusStore},
-		Log:         &podrest.LogREST{Store: store, KubeletConn: k},
-		Proxy:       &podrest.ProxyREST{Store: store, ProxyTransport: proxyTransport},
-		Exec:        &podrest.ExecREST{Store: store, KubeletConn: k},
-		Attach:      &podrest.AttachREST{Store: store, KubeletConn: k},
-		PortForward: &podrest.PortForwardREST{Store: store, KubeletConn: k},
-	}
-}
-
 ```
 
 
