@@ -1185,6 +1185,22 @@ func (s *Scheme) AddKnownTypeWithName(gvk schema.GroupVersionKind, obj Object) {
 	s.typeToGVK[t] = append(s.typeToGVK[t], gvk)
 }
 
+
+
+// New returns a new API object of the given version and name, or an error if it hasn't
+// been registered. The version and kind fields must be specified.
+func (s *Scheme) New(kind schema.GroupVersionKind) (Object, error) {
+	if t, exists := s.gvkToType[kind]; exists {
+		return reflect.New(t).Interface().(Object), nil
+	}
+
+	if t, exists := s.unversionedKinds[kind.Kind]; exists {
+		return reflect.New(t).Interface().(Object), nil
+	}
+	return nil, NewNotRegisteredErrForKind(kind)
+}
+
+
 ```
 
 
