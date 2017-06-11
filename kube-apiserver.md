@@ -1200,10 +1200,70 @@ func (s *Scheme) New(kind schema.GroupVersionKind) (Object, error) {
 	return nil, NewNotRegisteredErrForKind(kind)
 }
 
+```
 
+k8s.io/kubernetes/pkg/api/v1/types.go
+定义了Rest API接口涉及的所有数据类型。
+
+k8s.io/kubernetes/pkg/api/register.go
+
+```go
+func init() {
+	// We only register manually written functions here. The registration of the
+	// generated functions takes place in the generated files. The separation
+	// makes the code compile even when the generated files are missing.
+	localSchemeBuilder.Register(addKnownTypes, addDefaultingFuncs, addConversionFuncs, addFastPathConversionFuncs)
+}
+```
+
+k8s.io/kubernetes/pkg/api/v1/defaults.go
+
+```go
+func addDefaultingFuncs(scheme *runtime.Scheme) error {
+	return RegisterDefaults(scheme)
+}
+```
+k8s.io/kubernetes/pkg/api/v1/zz_generated.defaults.go
+
+```go
+func RegisterDefaults(scheme *runtime.Scheme) error {
+	scheme.AddTypeDefaultingFunc(&ConfigMap{}, func(obj interface{}) { SetObjectDefaults_ConfigMap(obj.(*ConfigMap)) })
+	/// ....
+}
 ```
 
 
+k8s.io/kubernetes/pkg/api/v1/conversion.go
+```go
+func addConversionFuncs(scheme *runtime.Scheme) error {
+	// Add non-generated conversion functions
+	err := scheme.AddConversionFuncs(
+		Convert_api_Pod_To_v1_Pod,
+		Convert_api_PodSpec_To_v1_PodSpec,
+		Convert_api_ReplicationControllerSpec_To_v1_ReplicationControllerSpec,
+		Convert_api_ServiceSpec_To_v1_ServiceSpec,
+		Convert_v1_Pod_To_api_Pod,
+		Convert_v1_PodSpec_To_api_PodSpec,
+		Convert_v1_ReplicationControllerSpec_To_api_ReplicationControllerSpec,
+		Convert_v1_Secret_To_api_Secret,
+		Convert_v1_ServiceSpec_To_api_ServiceSpec,
+		Convert_v1_ResourceList_To_api_ResourceList,
+		Convert_v1_ReplicationController_to_extensions_ReplicaSet,
+		Convert_v1_ReplicationControllerSpec_to_extensions_ReplicaSetSpec,
+		Convert_v1_ReplicationControllerStatus_to_extensions_ReplicaSetStatus,
+		Convert_extensions_ReplicaSet_to_v1_ReplicationController,
+		Convert_extensions_ReplicaSetSpec_to_v1_ReplicationControllerSpec,
+		Convert_extensions_ReplicaSetStatus_to_v1_ReplicationControllerStatus,
+	)
+	
+	// ....
+}
+```
+
+k8s.io/kubernetes/pkg/api/v1/types.generated.go
+
+
+k8s.io/kubernetes/pkg/api/v1/zz_generated.conversion.go
 vendor/k8s.io/apimachinery/pkg/runtime/serializer
 
 定义了 En/Decoder 包括 json/protobuf/yaml 等
