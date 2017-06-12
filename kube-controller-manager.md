@@ -31,10 +31,11 @@ func Run(s *options.CMServer) error {
 	// ...
 
 	run := func(stop <-chan struct{}) {
-	// ...
-
+		// ...
 		err := StartControllers(NewControllerInitializers(), s, rootClientBuilder, clientBuilder, stop)
-
+		// ...
+	}
+	
 	leaderelection.RunOrDie(leaderelection.LeaderElectionConfig{
 		Lock:          rl,
 		LeaseDuration: s.LeaderElection.LeaseDuration.Duration,
@@ -253,39 +254,17 @@ func (rm *ReplicationManager) processNextWorkItem() bool {
 // it did not expect to see any more of its pods created or deleted. This function is not meant to be invoked
 // concurrently with the same key.
 func (rm *ReplicationManager) syncReplicationController(key string) error {
-	trace := utiltrace.New("syncReplicationController: " + key)
-	defer trace.LogIfLong(250 * time.Millisecond)
-
-	startTime := time.Now()
-	defer func() {
-		glog.V(4).Infof("Finished syncing controller %q (%v)", key, time.Now().Sub(startTime))
-	}()
-
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
-	if err != nil {
-		return err
-	}
-	rc, err := rm.rcLister.ReplicationControllers(namespace).Get(name)
-	if errors.IsNotFound(err) {
-		glog.Infof("Replication Controller has been deleted %v", key)
-		rm.expectations.DeleteExpectations(key)
-		return nil
-	}
-	if err != nil {
-		return err
-	}
 
-	trace.Step("ReplicationController restored")
+	rc, err := rm.rcLister.ReplicationControllers(namespace).Get(name)
+
 	rcNeedsSync := rm.expectations.SatisfiedExpectations(key)
-	trace.Step("Expectations restored")
 
 	// list all pods to include the pods that don't match the rc's selector
 	// anymore but has the stale controller ref.
 	// TODO: Do the List and Filter in a single pass, or use an index.
 	allPods, err := rm.podLister.Pods(rc.Namespace).List(labels.Everything())
-	if err != nil {
-		return err
-	}
+
 	// Ignore inactive pods.
 	var filteredPods []*v1.Pod
 	for _, pod := range allPods {
@@ -317,12 +296,12 @@ func (rm *ReplicationManager) syncReplicationController(key string) error {
 	if rcNeedsSync && rc.DeletionTimestamp == nil {
 		manageReplicasErr = rm.manageReplicas(filteredPods, rc)
 	}
-	trace.Step("manageReplicas done")
-
+	
 	copy, err := api.Scheme.DeepCopy(rc)
 	if err != nil {
 		return err
 	}
+	
 	rc = copy.(*v1.ReplicationController)
 
 	newStatus := calculateStatus(rc, filteredPods, manageReplicasErr)
