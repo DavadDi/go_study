@@ -1171,8 +1171,6 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, _ v1.PodStatus, podStat
 	result.AddSyncResult(configPodSandboxResult)
 	podSandboxConfig, err := m.generatePodSandboxConfig(pod, podContainerChanges.Attempt)
 	if err != nil {
-		message := fmt.Sprintf("GeneratePodSandboxConfig for pod %q failed: %v", format.Pod(pod), err)
-		glog.Error(message)
 		configPodSandboxResult.Fail(kubecontainer.ErrConfigPodSandbox, message)
 		return
 	}
@@ -1192,11 +1190,7 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, _ v1.PodStatus, podStat
 		result.AddSyncResult(startContainerResult)
 		isInBackOff, msg, err := m.doBackOff(pod, container, podStatus, backOff)
 
-		if msg, err := m.startContainer(podSandboxID, podSandboxConfig, container, pod, podStatus, pullSecrets, podIP); err != nil {
-			startContainerResult.Fail(err, msg)
-			utilruntime.HandleError(fmt.Errorf("init container start failed: %v: %s", err, msg))
-			return
-		}
+		m.startContainer(podSandboxID, podSandboxConfig, container, pod, podStatus, pullSecrets, podIP)
 
 		// Successfully started the container; clear the entry in the failure
 		return
@@ -1211,14 +1205,11 @@ func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, _ v1.PodStatus, podStat
 		isInBackOff, msg, err := m.doBackOff(pod, container, podStatus, backOff)
 		if isInBackOff {
 			startContainerResult.Fail(err, msg)
-			glog.V(4).Infof("Backing Off restarting container %+v in pod %v", container, format.Pod(pod))
 			continue
 		}
 
-		glog.V(4).Infof("Creating container %+v in pod %v", container, format.Pod(pod))
 		if msg, err := m.startContainer(podSandboxID, podSandboxConfig, container, pod, podStatus, pullSecrets, podIP); err != nil {
 			startContainerResult.Fail(err, msg)
-			utilruntime.HandleError(fmt.Errorf("container start failed: %v: %s", err, msg))
 			continue
 		}
 	}
@@ -1356,7 +1347,7 @@ func (m *manager) syncBatch() {
 
 
 
-## 7. Kubelet probManager()
+## 6. Kubelet probManager()
 
 ```go
 // Kubelet is the main kubelet implementation.
