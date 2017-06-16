@@ -180,7 +180,13 @@ func NewMainKubelet(kubeCfg *componentconfig.KubeletConfiguration, kubeDeps *Kub
 		var err error
 		kubeDeps.PodConfig, err = makePodSourceConfig(kubeCfg, kubeDeps, nodeName)
 
-	// ...
+	  // ...
+      klet.statusManager = status.NewManager(klet.kubeClient, klet.podManager, klet)
+      
+      // ...
+      klet.podWorkers = newPodWorkers(klet.syncPod, kubeDeps.Recorder, klet.workQueue, klet.resyncInterval, backOffPeriod, klet.podCache)
+      
+     // ...
 }
 ```
 
@@ -669,7 +675,7 @@ func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handle
 			// ADD as if they are new pods. These pods will then go through the
 			// admission process and *may* be rejected. This can be resolved
 			// once we have checkpointing.
-			handler.HandlePodAdditions(u.Pods)
+			handler.HandlePodAdditions(u.Pods)  // 接着讲解流程
 		case kubetypes.UPDATE:
 			handler.HandlePodUpdates(u.Pods)
 		case kubetypes.REMOVE:
@@ -721,10 +727,8 @@ func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handle
 			pod, ok := kl.podManager.GetPodByUID(update.PodUID)
 			if !ok {
 				// If the pod no longer exists, ignore the update.
-				glog.V(4).Infof("SyncLoop (container unhealthy): ignore irrelevant update: %#v", update)
 				break
 			}
-			glog.V(1).Infof("SyncLoop (container unhealthy): %q", format.Pod(pod))
 			handler.HandlePodSyncs([]*v1.Pod{pod})
 		}
 	case <-housekeepingCh:
@@ -733,13 +737,615 @@ func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handle
 			// skip housekeeping, as we may accidentally delete pods from unready sources.
 			glog.V(4).Infof("SyncLoop (housekeeping, skipped): sources aren't ready yet.")
 		} else {
-			glog.V(4).Infof("SyncLoop (housekeeping)")
-			if err := handler.HandlePodCleanups(); err != nil {
-				glog.Errorf("Failed cleaning pods: %v", err)
-			}
+			err := handler.HandlePodCleanups()
 		}
 	}
 	kl.syncLoopMonitor.Store(kl.clock.Now())
 	return true
 }
 ```
+
+
+> Kubelet automatically creates so-called *mirror pod* on Kubernetes API server for each static pod, so the pods are visible there, but they cannot be controlled from the API server.
+
+```go
+// HandlePodAdditions is the callback in SyncHandler for pods being added from
+// a config source.
+func (kl *Kubelet) HandlePodAdditions(pods []*v1.Pod) {
+	start := kl.clock.Now()
+	sort.Sort(sliceutils.PodsByCreationTime(pods))
+	for _, pod := range pods {
+      	// k8s.io/kubernetes/pkg/kubelet/pod/pod_manager.go
+        // NewBasicPodManager(client MirrorClient, secretManager secret.Manager) Manager
+        // basicManager
+		existingPods := kl.podManager.GetPods()
+		// Always add the pod to the pod manager. Kubelet relies on the pod
+		// manager as the source of truth for the desired state. If a pod does
+		// not exist in the pod manager, it means that it has been deleted in
+		// the apiserver and no action (other than cleanup) is required.
+		kl.podManager.AddPod(pod)
+
+		if kubepod.IsMirrorPod(pod) {
+			kl.handleMirrorPod(pod, start)
+			continue
+		}
+
+		if !kl.podIsTerminated(pod) {
+			// We failed pods that we rejected, so activePods include all admitted
+			// pods that are alive.
+			activePods := kl.filterOutTerminatedPods(existingPods)
+
+			// Check if we can admit the pod; if not, reject it.
+			if ok, reason, message := kl.canAdmitPod(activePods, pod); !ok {
+				kl.rejectPod(pod, reason, message)
+				continue
+			}
+		}
+		mirrorPod, _ := kl.podManager.GetMirrorPodByPod(pod)
+		kl.dispatchWork(pod, kubetypes.SyncPodCreate, mirrorPod, start) // 进行分发
+		kl.probeManager.AddPod(pod) // Handles container probing.
+	}
+}
+```
+
+
+
+```go
+// dispatchWork starts the asynchronous sync of the pod in a pod worker.
+// If the pod is terminated, dispatchWork
+func (kl *Kubelet) dispatchWork(pod *v1.Pod, syncType kubetypes.SyncPodType, mirrorPod *v1.Pod, start time.Time) {
+	// ...
+	// Run the sync in an async worker.
+	kl.podWorkers.UpdatePod(&UpdatePodOptions{
+		Pod:        pod,
+		MirrorPod:  mirrorPod,
+		UpdateType: syncType,
+		OnCompleteFunc: func(err error) {
+			if err != nil {
+				metrics.PodWorkerLatency.WithLabelValues(syncType.String()).Observe(metrics.SinceInMicroseconds(start))
+			}
+		},
+	})
+	// Note the number of containers for new pods.
+	if syncType == kubetypes.SyncPodCreate {
+		metrics.ContainersPerPodCount.Observe(float64(len(pod.Spec.Containers)))
+	}
+}
+
+type podWorkers struct {
+	// Protects all per worker fields.
+	podLock sync.Mutex
+
+	// Tracks all running per-pod goroutines - per-pod goroutine will be
+	// processing updates received through its corresponding channel.
+	podUpdates map[types.UID]chan UpdatePodOptions
+	// Track the current state of per-pod goroutines.
+	// Currently all update request for a given pod coming when another
+	// update of this pod is being processed are ignored.
+	isWorking map[types.UID]bool
+	// Tracks the last undelivered work item for this pod - a work item is
+	// undelivered if it comes in while the worker is working.
+	lastUndeliveredWorkUpdate map[types.UID]UpdatePodOptions
+
+	workQueue queue.WorkQueue
+
+	// This function is run to sync the desired stated of pod.
+	// NOTE: This function has to be thread-safe - it can be called for
+	// different pods at the same time.
+	syncPodFn syncPodFnType
+
+	// The EventRecorder to use
+	recorder record.EventRecorder
+
+	// backOffPeriod is the duration to back off when there is a sync error.
+	backOffPeriod time.Duration
+
+	// resyncInterval is the duration to wait until the next sync.
+	resyncInterval time.Duration
+
+	// podCache stores kubecontainer.PodStatus for all pods.
+	podCache kubecontainer.Cache
+}
+```
+
+
+
+```go
+// Apply the new setting to the specified pod.
+// If the options provide an OnCompleteFunc, the function is invoked if the update is accepted.
+// Update requests are ignored if a kill pod request is pending.
+func (p *podWorkers) UpdatePod(options *UpdatePodOptions) {
+	pod := options.Pod
+	uid := pod.UID
+	var podUpdates chan UpdatePodOptions
+	var exists bool
+
+	p.podLock.Lock()
+	defer p.podLock.Unlock()
+	if podUpdates, exists = p.podUpdates[uid]; !exists {
+		// We need to have a buffer here, because checkForUpdates() method that
+		// puts an update into channel is called from the same goroutine where
+		// the channel is consumed. However, it is guaranteed that in such case
+		// the channel is empty, so buffer of size 1 is enough.
+		podUpdates = make(chan UpdatePodOptions, 1)
+		p.podUpdates[uid] = podUpdates
+
+		// Creating a new pod worker either means this is a new pod, or that the
+		// kubelet just restarted. In either case the kubelet is willing to believe
+		// the status of the pod for the first pod worker sync. See corresponding
+		// comment in syncPod.
+		go func() {
+			defer runtime.HandleCrash()
+			p.managePodLoop(podUpdates)
+		}()
+	}
+	if !p.isWorking[pod.UID] {
+		p.isWorking[pod.UID] = true
+		podUpdates <- *options
+	} else {
+		// if a request to kill a pod is pending, we do not let anything overwrite that request.
+		update, found := p.lastUndeliveredWorkUpdate[pod.UID]
+		if !found || update.UpdateType != kubetypes.SyncPodKill {
+			p.lastUndeliveredWorkUpdate[pod.UID] = *options
+		}
+	}
+}
+
+func (p *podWorkers) managePodLoop(podUpdates <-chan UpdatePodOptions) {
+	var lastSyncTime time.Time
+	for update := range podUpdates {
+		err := func() error {
+			podUID := update.Pod.UID
+			// This is a blocking call that would return only if the cache
+			// has an entry for the pod that is newer than minRuntimeCache
+			// Time. This ensures the worker doesn't start syncing until
+			// after the cache is at least newer than the finished time of
+			// the previous sync.
+			status, err := p.podCache.GetNewerThan(podUID, lastSyncTime)
+			if err != nil {
+				return err
+			}
+			err = p.syncPodFn(syncPodOptions{
+				mirrorPod:      update.MirrorPod,
+				pod:            update.Pod,
+				podStatus:      status,
+				killPodOptions: update.KillPodOptions,
+				updateType:     update.UpdateType,
+			})
+			lastSyncTime = time.Now()
+			return err
+		}()
+		// notify the call-back function if the operation succeeded or not
+		if update.OnCompleteFunc != nil {
+			update.OnCompleteFunc(err)
+		}
+		if err != nil {
+			glog.Errorf("Error syncing pod %s (%q), skipping: %v", update.Pod.UID, format.Pod(update.Pod), err)
+			p.recorder.Eventf(update.Pod, v1.EventTypeWarning, events.FailedSync, "Error syncing pod, skipping: %v", err)
+		}
+		p.wrapUp(update.Pod.UID, err)
+	}
+}
+
+// klet.podWorkers = newPodWorkers(klet.syncPod, kubeDeps.Recorder, klet.workQueue, klet.resyncInterval, backOffPeriod, klet.podCache)
+func newPodWorkers(syncPodFn syncPodFnType, recorder record.EventRecorder, workQueue queue.WorkQueue,
+	resyncInterval, backOffPeriod time.Duration, podCache kubecontainer.Cache) *podWorkers {
+	return &podWorkers{
+		podUpdates:                map[types.UID]chan UpdatePodOptions{},
+		isWorking:                 map[types.UID]bool{},
+		lastUndeliveredWorkUpdate: map[types.UID]UpdatePodOptions{},
+		syncPodFn:                 syncPodFn, // kubelet.syncPod()
+		recorder:                  recorder,
+		workQueue:                 workQueue,
+		resyncInterval:            resyncInterval,
+		backOffPeriod:             backOffPeriod,
+		podCache:                  podCache,
+	}
+}
+```
+
+
+
+## 4. Kublet syncPod()
+
+
+
+```go
+// syncPod is the transaction script for the sync of a single pod.
+//
+// Arguments:
+//
+// o - the SyncPodOptions for this invocation
+//
+// The workflow is:
+// * If the pod is being created, record pod worker start latency
+// * Call generateAPIPodStatus to prepare an v1.PodStatus for the pod
+// * If the pod is being seen as running for the first time, record pod
+//   start latency
+// * Update the status of the pod in the status manager
+// * Kill the pod if it should not be running
+// * Create a mirror pod if the pod is a static pod, and does not
+//   already have a mirror pod
+// * Create the data directories for the pod if they do not exist
+// * Wait for volumes to attach/mount
+// * Fetch the pull secrets for the pod
+// * Call the container runtime's SyncPod callback
+// * Update the traffic shaping for the pod's ingress and egress limits
+//
+// If any step of this workflow errors, the error is returned, and is repeated
+// on the next syncPod call.
+func (kl *Kubelet) syncPod(o syncPodOptions) error {
+	// pull out the required options
+	pod := o.pod
+	mirrorPod := o.mirrorPod
+	podStatus := o.podStatus
+	updateType := o.updateType
+
+	// if we want to kill a pod, do it now!
+	// ...
+
+	// Latency measurements for the main workflow are relative to the
+	// first time the pod was seen by the API server.
+	var firstSeenTime time.Time
+	if firstSeenTimeStr, ok := pod.Annotations[kubetypes.ConfigFirstSeenAnnotationKey]; ok {
+		firstSeenTime = kubetypes.ConvertToTimestamp(firstSeenTimeStr).Get()
+	}
+
+	// Record pod worker start latency if being created
+  	// ...
+
+	// Generate final API pod status with pod and status manager status
+	apiPodStatus := kl.generateAPIPodStatus(pod, podStatus)
+	// The pod IP may be changed in generateAPIPodStatus if the pod is using host network. (See #24576)
+	// TODO(random-liu): After writing pod spec into container labels, check whether pod is using host network, and
+	// set pod IP to hostIP directly in runtime.GetPodStatus
+	podStatus.IP = apiPodStatus.PodIP
+
+	// Record the time it takes for the pod to become running.
+	existingStatus, ok := kl.statusManager.GetPodStatus(pod.UID)
+	if !ok || existingStatus.Phase == v1.PodPending && apiPodStatus.Phase == v1.PodRunning &&
+		!firstSeenTime.IsZero() {
+		metrics.PodStartLatency.Observe(metrics.SinceInMicroseconds(firstSeenTime))
+	}
+
+	runnable := kl.canRunPod(pod)
+	// ...
+	// Update status in the status manager
+    // 将 pod 的变化状态信息放入到 statusManager， 用于同步到 API Server
+	kl.statusManager.SetPodStatus(pod, apiPodStatus)
+
+	// Kill pod if it should not be running
+	// ....
+
+	// If the network plugin is not ready, only start the pod if it uses the host network
+	// Create Cgroups for the pod and apply resource parameters
+	// to them if cgroups-per-qos flag is enabled.
+	pcm := kl.containerManager.NewPodContainerManager()
+	// If pod has already been terminated then we need not create
+	// or update the pod's cgroup
+	if !kl.podIsTerminated(pod) {
+		// When the kubelet is restarted with the cgroups-per-qos
+		// flag enabled, all the pod's running containers
+		// should be killed intermittently and brought back up
+		// under the qos cgroup hierarchy.
+		// Check if this is the pod's first sync
+		firstSync := true
+		for _, containerStatus := range apiPodStatus.ContainerStatuses {
+			if containerStatus.State.Running != nil {
+				firstSync = false
+				break
+			}
+		}
+		// Don't kill containers in pod if pod's cgroups already
+		// exists or the pod is running for the first time
+		podKilled := false
+		if !pcm.Exists(pod) && !firstSync {
+			if err := kl.killPod(pod, nil, podStatus, nil); err == nil {
+				podKilled = true
+			}
+		}
+		// Create and Update pod's Cgroups
+		// Don't create cgroups for run once pod if it was killed above
+		// The current policy is not to restart the run once pods when
+		// the kubelet is restarted with the new flag as run once pods are
+		// expected to run only once and if the kubelet is restarted then
+		// they are not expected to run again.
+		// We don't create and apply updates to cgroup if its a run once pod and was killed above
+		if !(podKilled && pod.Spec.RestartPolicy == v1.RestartPolicyNever) {
+			if !pcm.Exists(pod) {
+				if err := kl.containerManager.UpdateQOSCgroups(); err != nil {
+					glog.V(2).Infof("Failed to update QoS cgroups while syncing pod: %v", err)
+				}
+				if err := pcm.EnsureExists(pod); err != nil {
+					return fmt.Errorf("failed to ensure that the pod: %v cgroups exist and are correctly applied: %v", pod.UID, err)
+				}
+			}
+		}
+	}
+
+	// Create Mirror Pod for Static Pod if it doesn't already exist
+	if kubepod.IsStaticPod(pod) {
+      // Create Mirror Pod for Static Pod if it doesn't already exist
+    }
+	// Make data directories for the pod
+	err := kl.makePodDataDirs(pod)
+
+	// Wait for volumes to attach/mount
+	kl.volumeManager.WaitForAttachAndMount(pod)
+
+	// Fetch the pull secrets for the pod
+	pullSecrets := kl.getPullSecretsForPod(pod)
+
+	// Call the container runtime's SyncPod callback
+    // kubeGenericRuntimeManager， 封装了 rkt和docker等多种支持
+	result := kl.containerRuntime.SyncPod(pod, apiPodStatus, podStatus, pullSecrets, kl.backOff)
+	kl.reasonCache.Update(pod.UID, result)
+	if err := result.Error(); err != nil {
+		return err
+	}
+  
+	// early successful exit if pod is not bandwidth-constrained
+
+	// Update the traffic shaping for the pod's ingress and egress limits
+	ingress, egress, err := bandwidth.ExtractPodBandwidthResources(pod.Annotations)
+  
+    // ...
+	return nil
+}
+```
+
+
+
+k8s.io/kubernetes/pkg/kubelet/kuberuntime/kuberuntime_manager.go
+
+```go
+// SyncPod syncs the running pod into the desired pod by executing following steps:
+//
+//  1. Compute sandbox and container changes.
+//  2. Kill pod sandbox if necessary.
+//  3. Kill any containers that should not be running.
+//  4. Create sandbox if necessary.
+//  5. Create init containers.
+//  6. Create normal containers.
+func (m *kubeGenericRuntimeManager) SyncPod(pod *v1.Pod, _ v1.PodStatus, podStatus *kubecontainer.PodStatus, pullSecrets []v1.Secret, backOff *flowcontrol.Backoff) (result kubecontainer.PodSyncResult) {
+	// Step 1: Compute sandbox and container changes.
+	podContainerChanges := m.computePodContainerChanges(pod, podStatus)
+	if podContainerChanges.CreateSandbox {
+		ref, err := ref.GetReference(api.Scheme, pod)
+		if podContainerChanges.SandboxID != "" {
+			m.recorder.Eventf(ref, v1.EventTypeNormal, "SandboxChanged", "Pod sandbox changed, it will be killed and re-created.")
+		} 
+	}
+
+	// Step 2: Kill the pod if the sandbox has changed.
+	killResult := m.killPodWithSyncResult(pod, kubecontainer.ConvertPodStatusToRunningPod(m.runtimeName, podStatus), nil)
+		result.AddPodSyncResult(killResult)
+	} else {
+		// Step 3: kill any running containers in this pod which are not to keep.
+		for containerID, containerInfo := range podContainerChanges.ContainersToKill {
+			killContainerResult := kubecontainer.NewSyncResult(kubecontainer.KillContainer, containerInfo.name)
+			result.AddSyncResult(killContainerResult)
+			if err := m.killContainer(pod, containerID, containerInfo.name, containerInfo.message, nil); err != nil {
+				killContainerResult.Fail(kubecontainer.ErrKillContainer, err.Error())
+				return
+			}
+		}
+	}
+
+	// Keep terminated init containers fairly aggressively controlled
+	m.pruneInitContainersBeforeStart(pod, podStatus, podContainerChanges.InitContainersToKeep)
+
+	// We pass the value of the podIP down to generatePodSandboxConfig and
+	// generateContainerConfig, which in turn passes it to various other
+	// functions, in order to facilitate functionality that requires this
+	// value (hosts file and downward API) and avoid races determining
+	// the pod IP in cases where a container requires restart but the
+	// podIP isn't in the status manager yet.
+	//
+	// We default to the IP in the passed-in pod status, and overwrite it if the
+	// sandbox needs to be (re)started.
+
+	// Step 4: Create a sandbox for the pod if necessary.
+	podSandboxID := podContainerChanges.SandboxID
+	if podContainerChanges.CreateSandbox && len(podContainerChanges.ContainersToStart) > 0 {
+		createSandboxResult := kubecontainer.NewSyncResult(kubecontainer.CreatePodSandbox, format.Pod(pod))
+		result.AddSyncResult(createSandboxResult)
+		podSandboxID, msg, err = m.createPodSandbox(pod, podContainerChanges.Attempt)
+		podSandboxStatus, err := m.runtimeService.PodSandboxStatus(podSandboxID)
+      
+		// If we ever allow updating a pod from non-host-network to
+		// host-network, we may use a stale IP.
+		if !kubecontainer.IsHostNetworkPod(pod) {
+			// Overwrite the podIP passed in the pod status, since we just started the pod sandbox.
+			podIP = m.determinePodSandboxIP(pod.Namespace, pod.Name, podSandboxStatus
+		}
+	}
+
+	// Get podSandboxConfig for containers to start.
+	configPodSandboxResult := kubecontainer.NewSyncResult(kubecontainer.ConfigPodSandbox, podSandboxID)
+	result.AddSyncResult(configPodSandboxResult)
+	podSandboxConfig, err := m.generatePodSandboxConfig(pod, podContainerChanges.Attempt)
+	if err != nil {
+		message := fmt.Sprintf("GeneratePodSandboxConfig for pod %q failed: %v", format.Pod(pod), err)
+		glog.Error(message)
+		configPodSandboxResult.Fail(kubecontainer.ErrConfigPodSandbox, message)
+		return
+	}
+
+	// Step 5: start init containers.
+	status, next, done := findNextInitContainerToRun(pod, podStatus)
+	if status != nil && status.ExitCode != 0 {
+		// container initialization has failed, flag the pod as failed
+		initContainerResult := kubecontainer.NewSyncResult(kubecontainer.InitContainer, status.Name)
+		initContainerResult.Fail(kubecontainer.ErrRunInitContainer, fmt.Sprintf("init container %q exited with %d", status.Name, status.ExitCode))
+		result.AddSyncResult(initContainerResult)
+	}
+
+		// If we need to start the next container, do so now then exit
+		container := next
+		startContainerResult := kubecontainer.NewSyncResult(kubecontainer.StartContainer, container.Name)
+		result.AddSyncResult(startContainerResult)
+		isInBackOff, msg, err := m.doBackOff(pod, container, podStatus, backOff)
+
+		if msg, err := m.startContainer(podSandboxID, podSandboxConfig, container, pod, podStatus, pullSecrets, podIP); err != nil {
+			startContainerResult.Fail(err, msg)
+			utilruntime.HandleError(fmt.Errorf("init container start failed: %v: %s", err, msg))
+			return
+		}
+
+		// Successfully started the container; clear the entry in the failure
+		return
+	}
+
+	// Step 6: start containers in podContainerChanges.ContainersToStart.
+	for idx := range podContainerChanges.ContainersToStart {
+		container := &pod.Spec.Containers[idx]
+		startContainerResult := kubecontainer.NewSyncResult(kubecontainer.StartContainer, container.Name)
+		result.AddSyncResult(startContainerResult)
+
+		isInBackOff, msg, err := m.doBackOff(pod, container, podStatus, backOff)
+		if isInBackOff {
+			startContainerResult.Fail(err, msg)
+			glog.V(4).Infof("Backing Off restarting container %+v in pod %v", container, format.Pod(pod))
+			continue
+		}
+
+		glog.V(4).Infof("Creating container %+v in pod %v", container, format.Pod(pod))
+		if msg, err := m.startContainer(podSandboxID, podSandboxConfig, container, pod, podStatus, pullSecrets, podIP); err != nil {
+			startContainerResult.Fail(err, msg)
+			utilruntime.HandleError(fmt.Errorf("container start failed: %v: %s", err, msg))
+			continue
+		}
+	}
+
+	return
+}
+```
+
+
+
+
+
+## 5. Kublet statusManager()
+
+k8s.io/kubernetes/pkg/kubelet/status/status_manager.go
+
+```go
+// klet.statusManager = status.NewManager(klet.kubeClient, klet.podManager, klet)
+func NewManager(kubeClient clientset.Interface, podManager kubepod.Manager, podDeletionSafety PodDeletionSafetyProvider) Manager {
+	return &manager{
+		kubeClient:        kubeClient,
+		podManager:        podManager,
+		podStatuses:       make(map[types.UID]versionedPodStatus),
+		podStatusChannel:  make(chan podStatusSyncRequest, 1000), // Buffer up to 1000 statuses
+		apiStatusVersions: make(map[types.UID]uint64),
+		podDeletionSafety: podDeletionSafety,
+	}
+}
+
+func (kl *Kubelet) Run(updates <-chan kubetypes.PodUpdate) {
+    // ...
+    // Start component sync loops.
+    kl.statusManager.Start()
+    kl.probeManager.Start()
+    // ...
+}
+
+
+func (m *manager) SetPodStatus(pod *v1.Pod, status v1.PodStatus) {
+	m.podStatusesLock.Lock()
+	defer m.podStatusesLock.Unlock()
+	// Make sure we're caching a deep copy.
+	status, err := copyStatus(&status)
+	if err != nil {
+		return
+	}
+	// Force a status update if deletion timestamp is set. This is necessary
+	// because if the pod is in the non-running state, the pod worker still
+	// needs to be able to trigger an update and/or deletion.
+	m.updateStatusInternal(pod, status, pod.DeletionTimestamp != nil)
+}
+
+// updateStatusInternal updates the internal status cache, and queues an update to the api server if
+// necessary. Returns whether an update was triggered.
+// This method IS NOT THREAD SAFE and must be called from a locked function.
+func (m *manager) updateStatusInternal(pod *v1.Pod, status v1.PodStatus, forceUpdate bool) bool{
+    // ... 生成一个 podStatusSyncRequest 请求放入到 channel 中
+  	select {
+	case m.podStatusChannel <- podStatusSyncRequest{pod.UID, newStatus}:
+		return true
+    }
+}
+
+func (m *manager) Start() {
+	// Don't start the status manager if we don't have a client. This will happen
+	// on the master, where the kubelet is responsible for bootstrapping the pods
+	// of the master components.
+  
+	glog.Info("Starting to sync pod status with apiserver")
+	syncTicker := time.Tick(syncPeriod)
+	// syncPod and syncBatch share the same go routine to avoid sync races.
+	go wait.Forever(func() {
+		select {
+		case syncRequest := <-m.podStatusChannel:
+			m.syncPod(syncRequest.podUID, syncRequest.status)
+		case <-syncTicker:
+			m.syncBatch()
+		}
+	}, 0)
+}
+
+// syncPod syncs the given status with the API server. The caller must not hold the lock.
+func (m *manager) syncPod(uid types.UID, status versionedPodStatus) {
+    // ...
+    newPod, err := m.kubeClient.Core().Pods(pod.Namespace).UpdateStatus(pod)
+  
+    // ...
+}
+
+// syncBatch syncs pods statuses with the apiserver.
+func (m *manager) syncBatch() {
+	var updatedStatuses []podStatusSyncRequest
+	podToMirror, mirrorToPod := m.podManager.GetUIDTranslations()
+	func() { // Critical section
+		m.podStatusesLock.RLock()
+		defer m.podStatusesLock.RUnlock()
+
+		// Clean up orphaned versions.
+		for uid := range m.apiStatusVersions {
+			_, hasPod := m.podStatuses[uid]
+			_, hasMirror := mirrorToPod[uid]
+			if !hasPod && !hasMirror {
+				delete(m.apiStatusVersions, uid)
+			}
+		}
+
+		for uid, status := range m.podStatuses {
+			syncedUID := uid
+			if mirrorUID, ok := podToMirror[uid]; ok {
+				if mirrorUID == "" {
+					glog.V(5).Infof("Static pod %q (%s/%s) does not have a corresponding mirror pod; skipping", uid, status.podName, status.podNamespace)
+					continue
+				}
+				syncedUID = mirrorUID
+			}
+			if m.needsUpdate(syncedUID, status) {
+				updatedStatuses = append(updatedStatuses, podStatusSyncRequest{uid, status})
+			} else if m.needsReconcile(uid, status.status) {
+				// Delete the apiStatusVersions here to force an update on the pod status
+				// In most cases the deleted apiStatusVersions here should be filled
+				// soon after the following syncPod() [If the syncPod() sync an update
+				// successfully].
+				delete(m.apiStatusVersions, syncedUID)
+				updatedStatuses = append(updatedStatuses, podStatusSyncRequest{uid, status})
+			}
+		}
+	}()
+
+	for _, update := range updatedStatuses {
+		glog.V(5).Infof("Status Manager: syncPod in syncbatch. pod UID: %q", update.podUID)
+		m.syncPod(update.podUID, update.status)
+	}
+}
+```
+
