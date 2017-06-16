@@ -783,6 +783,8 @@ func (kl *Kubelet) HandlePodAdditions(pods []*v1.Pod) {
 		}
 		mirrorPod, _ := kl.podManager.GetMirrorPodByPod(pod)
 		kl.dispatchWork(pod, kubetypes.SyncPodCreate, mirrorPod, start) // 进行分发
+		
+		// 处理probe相关的检测
 		kl.probeManager.AddPod(pod) // Handles container probing.
 	}
 }
@@ -1352,3 +1354,125 @@ func (m *manager) syncBatch() {
 }
 ```
 
+
+
+## 7. Kubelet probManager()
+
+```go
+// Kubelet is the main kubelet implementation.
+type Kubelet struct {
+	// ...
+	
+	// Handles container probing.
+	probeManager prober.Manager
+	
+	// Manages container health check results.
+	livenessManager proberesults.Manager
+	
+	// ...
+}
+
+func NewMainKubelet() {
+    // ...
+    
+    klet.livenessManager = proberesults.NewManager()
+    
+    // ...
+    
+    klet.probeManager = prober.NewManager(
+		klet.statusManager,
+		klet.livenessManager,
+		klet.runner,
+		containerRefManager,
+		kubeDeps.Recorder)
+    // ...
+}
+
+func (kl *Kubelet) syncLoopIteration(){
+    // ...
+    	case update := <-kl.livenessManager.Updates():
+		if update.Result == proberesults.Failure {
+			// The liveness manager detected a failure; sync the pod.
+
+			// We should not use the pod from livenessManager, because it is never updated after
+			// initialization.
+			pod, ok := kl.podManager.GetPodByUID(update.PodUID)
+			handler.HandlePodSyncs([]*v1.Pod{pod})
+		}
+    // ...
+}
+
+// Run starts the kubelet reacting to config updates
+func (kl *Kubelet) Run(updates <-chan kubetypes.PodUpdate) {
+	// ...
+	// Start component sync loops.
+	
+	kl.statusManager.Start()
+	kl.probeManager.Start()
+	
+	// ...
+}
+
+func (kl *Kubelet) HandlePodAdditions(pods []*v1.Pod) {
+	for _, pod := range pods {
+		kl.probeManager.AddPod(pod) // Handles container probing.
+	}
+}
+```
+
+k8s.io/kubernetes/pkg/kubelet/prober/prober_manager.go
+
+```go
+// Start syncing probe status. This should only be called once.
+func (m *manager) Start() {
+	// Start syncing readiness.
+	go wait.Forever(m.updateReadiness, 0)
+}
+
+func (m *manager) updateReadiness() {
+	update := <-m.readinessManager.Updates()
+
+	ready := update.Result == results.Success
+	m.statusManager.SetContainerReadiness(update.PodUID, update.ContainerID, ready)
+}
+```
+
+k8s.io/kubernetes/pkg/kubelet/status/status_manager.go
+
+```go
+
+func (m *manager) SetContainerReadiness(podUID types.UID, containerID kubecontainer.ContainerID, ready bool) {
+	pod, ok := m.podManager.GetPodByUID(podUID)
+	
+	oldStatus, found := m.podStatuses[pod.UID]
+
+	// Find the container to update.
+	containerStatus, _, ok := findContainerStatus(&oldStatus.status, containerID.String())
+
+	if containerStatus.Ready == ready {
+			format.Pod(pod), containerID.String())
+		return
+	}
+
+	// Make sure we're not updating the cached version.
+	status, err := copyStatus(&oldStatus.status)
+
+	containerStatus, _, _ = findContainerStatus(&status, containerID.String())
+	containerStatus.Ready = ready
+
+	// Update pod condition.
+	readyConditionIndex := -1
+	for i, condition := range status.Conditions {
+		if condition.Type == v1.PodReady {
+			readyConditionIndex = i
+			break
+		}
+	}
+	readyCondition := GeneratePodReadyCondition(&pod.Spec, status.ContainerStatuses, status.Phase)
+	
+	status.Conditions = append(status.Conditions, readyCondition)
+
+	// 放入到内部更新的channel中
+	m.updateStatusInternal(pod, status, false)
+}
+```
