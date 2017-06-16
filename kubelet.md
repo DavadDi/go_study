@@ -811,7 +811,10 @@ func (kl *Kubelet) dispatchWork(pod *v1.Pod, syncType kubetypes.SyncPodType, mir
 		metrics.ContainersPerPodCount.Observe(float64(len(pod.Spec.Containers)))
 	}
 }
+```
 
+k8s.io/kubernetes/pkg/kubelet/pod_workers.go
+```go
 type podWorkers struct {
 	// Protects all per worker fields.
 	podLock sync.Mutex
