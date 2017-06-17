@@ -949,11 +949,7 @@ func newPodWorkers(syncPodFn syncPodFnType, recorder record.EventRecorder, workQ
 }
 ```
 
-
-
 ## 4. Kublet syncPod()
-
-
 
 ```go
 // syncPod is the transaction script for the sync of a single pod.
