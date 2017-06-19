@@ -334,6 +334,8 @@ func construct(name string, fn func(), minInterval, maxInterval time.Duration, b
 
 ```
 
+k8s.io/kubernetes/pkg/util/async/bounded_frequency_runner.go
+
 ```go
 // Loop handles the periodic timer and run requests.  This is expected to be
 // called as a goroutine.
