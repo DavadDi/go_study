@@ -114,8 +114,8 @@ func NewProxyServer(config *componentconfig.KubeProxyConfiguration, cleanupAndEx
 
 		iptables.RegisterMetrics()
 		proxier = proxierIPTables
-		serviceEventHandler = proxierIPTables
-		endpointsEventHandler = proxierIPTables
+		serviceEventHandler = proxierIPTables       // 设置 handler 
+		endpointsEventHandler = proxierIPTables     // 设置 handler 
 		userspace.CleanupLeftovers(iptInterface)
 	} else {
 		// user space proxy. omit
@@ -150,12 +150,11 @@ func NewProxyServer(config *componentconfig.KubeProxyConfiguration, cleanupAndEx
 		OOMScoreAdj:            config.OOMScoreAdj,
 		ResourceContainer:      config.ResourceContainer,
 		ConfigSyncPeriod:       config.ConfigSyncPeriod.Duration,
-		ServiceEventHandler:    serviceEventHandler,
-		EndpointsEventHandler:  endpointsEventHandler,
+		ServiceEventHandler:    serviceEventHandler,   // proxierIPTables
+		EndpointsEventHandler:  endpointsEventHandler, // proxierIPTables
 		HealthzServer:          healthzServer,
 	}, nil
 }
-
 ```
 
 
@@ -181,14 +180,16 @@ func (s *ProxyServer) Run() error {
 	// set related settings
 	informerFactory := informers.NewSharedInformerFactory(s.Client, s.ConfigSyncPeriod)
 
+     // k8s.io/kubernetes/pkg/proxy/config/config.go
 	serviceConfig := proxyconfig.NewServiceConfig(informerFactory.Core().InternalVersion().Services(), s.ConfigSyncPeriod)
-	serviceConfig.RegisterEventHandler(s.ServiceEventHandler)
+	serviceConfig.RegisterEventHandler(s.ServiceEventHandler) // proxierIPTables
   	
      // 监听 service 的变化 From API Server
 	go serviceConfig.Run(wait.NeverStop)
 
+    // k8s.io/kubernetes/pkg/proxy/config/config.go
 	endpointsConfig := proxyconfig.NewEndpointsConfig(informerFactory.Core().InternalVersion().Endpoints(), s.ConfigSyncPeriod)
-	endpointsConfig.RegisterEventHandler(s.EndpointsEventHandler)
+	endpointsConfig.RegisterEventHandler(s.EndpointsEventHandler) // proxierIPTables
   
     // 监听 Endpoints 的变化 From API Server
 	go endpointsConfig.Run(wait.NeverStop)
@@ -231,6 +232,23 @@ func NewServiceConfig(serviceInformer coreinformers.ServiceInformer, resyncPerio
    return result
 }
 
+// ServiceHandler is an abstract interface of objects which receive
+// notifications about service object changes.
+type ServiceHandler interface {
+	// OnServiceAdd is called whenever creation of new service object
+	// is observed.
+	OnServiceAdd(service *api.Service)
+	// OnServiceUpdate is called whenever modification of an existing
+	// service object is observed.
+	OnServiceUpdate(oldService, service *api.Service)
+	// OnServiceDelete is called whenever deletion of an existing service
+	// object is observed.
+	OnServiceDelete(service *api.Service)
+	// OnServiceSynced is called once all the initial even handlers were
+	// called and the state is fully propagated to local cache.
+	OnServiceSynced()
+}
+
 // Run starts the goroutine responsible for calling
 // registered handlers.
 func (c *ServiceConfig) Run(stopCh <-chan struct{}) {
@@ -269,6 +287,24 @@ func NewEndpointsConfig(endpointsInformer coreinformers.EndpointsInformer, resyn
 	return result
 }
 
+
+// EndpointsHandler is an abstract interface of objects which receive
+// notifications about endpoints object changes.
+type EndpointsHandler interface {
+	// OnEndpointsAdd is called whenever creation of new endpoints object
+	// is observed.
+	OnEndpointsAdd(endpoints *api.Endpoints)
+	// OnEndpointsUpdate is called whenever modification of an existing
+	// endpoints object is observed.
+	OnEndpointsUpdate(oldEndpoints, endpoints *api.Endpoints)
+	// OnEndpointsDelete is called whever deletion of an existing endpoints
+	// object is observed.
+	OnEndpointsDelete(endpoints *api.Endpoints)
+	// OnEndpointsSynced is called once all the initial event handlers were
+	// called and the state is fully propagated to local cache.
+	OnEndpointsSynced()
+}
+
 // Run starts the goroutine responsible for calling registered handlers.
 func (c *EndpointsConfig) Run(stopCh <-chan struct{}) {
 	if !controller.WaitForCacheSync("endpoints config", stopCh, c.listerSynced) {
@@ -282,6 +318,10 @@ func (c *EndpointsConfig) Run(stopCh <-chan struct{}) {
 	<-stopCh
 }
 ```
+
+
+
+Proxier 实现了 ServiceHandler 和 EndpointsHandler 的接口。
 
 ### s.Proxier.SyncLoop() 
 
@@ -331,7 +371,6 @@ func construct(name string, fn func(), minInterval, maxInterval time.Duration, b
 	}
 	return bfr
 }
-
 ```
 
 k8s.io/kubernetes/pkg/util/async/bounded_frequency_runner.go
@@ -402,7 +441,7 @@ func (bfr *BoundedFrequencyRunner) Run() {
 ```go
 func (proxier *Proxier) OnEndpointsAdd(endpoints *api.Endpoints) {
 	namespacedName := types.NamespacedName{Namespace: endpoints.Namespace, Name: endpoints.Name}
-	if proxier.endpointsChanges.update(&namespacedName, nil, endpoints) && proxier.isInitialized() {
+	if proxier.endpointsChanges.update(&namespacedName, nil, endpoints) && proxier.isInitialized(){
 		// 传递一个信号过去，调用 BoundedFrequencyRunner::tryRun()
 		proxier.syncRunner.Run() 
 	}
