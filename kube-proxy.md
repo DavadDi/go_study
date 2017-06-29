@@ -184,19 +184,19 @@ func (s *ProxyServer) Run() error {
 	serviceConfig := proxyconfig.NewServiceConfig(informerFactory.Core().InternalVersion().Services(), s.ConfigSyncPeriod)
 	serviceConfig.RegisterEventHandler(s.ServiceEventHandler) // proxierIPTables
   	
-     // 监听 service 的变化 From API Server
+     // 监听 service 第一次同步结果，待 service 和 endpoint 都同步成功后，调用 proxier.syncProxyRules
 	go serviceConfig.Run(wait.NeverStop)
 
     // k8s.io/kubernetes/pkg/proxy/config/config.go
 	endpointsConfig := proxyconfig.NewEndpointsConfig(informerFactory.Core().InternalVersion().Endpoints(), s.ConfigSyncPeriod)
 	endpointsConfig.RegisterEventHandler(s.EndpointsEventHandler) // proxierIPTables
   
-    // 监听 Endpoints 的变化 From API Server
+    // 监听 Endpoints 第一次同步结果，待 service 和 endpoint 都同步成功后，调用 proxier.syncProxyRules
 	go endpointsConfig.Run(wait.NeverStop)
 
 	// This has to start after the calls to NewServiceConfig and NewEndpointsConfig because those
 	// functions must configure their shared informer event handlers first.
-    // 启动 informer 监听相关事件从 API Server的运行
+    // 启动 informer 监听相关事件从 API Server的运行，包括 service 和 endpoint 事件的变化
 	go informerFactory.Start(wait.NeverStop)
 
 	// Birth Cry after the birth is successful
@@ -252,17 +252,54 @@ type ServiceHandler interface {
 // Run starts the goroutine responsible for calling
 // registered handlers.
 func (c *ServiceConfig) Run(stopCh <-chan struct{}) {
+     // 一直等待 serviceInformer.Informer().HasSynced 的同步完成或者同步出错
 	if !controller.WaitForCacheSync("service config", stopCh, c.listerSynced) {
 		return
 	}
 
 	for i := range c.eventHandlers {
-		c.eventHandlers[i].OnServiceSynced()
+		c.eventHandlers[i].OnServiceSynced() // 此处实现的是观察者模式，观察者为 proxierIPTables
 	}
 
 	<-stopCh
 }
 ```
+
+
+
+k8s.io/kubernetes/pkg/proxy/iptables/proxier.go
+
+```go
+func (proxier *Proxier) OnServiceSynced() {
+   proxier.mu.Lock()
+   proxier.servicesSynced = true
+   proxier.setInitialized(proxier.servicesSynced && proxier.endpointsSynced)
+   proxier.mu.Unlock()
+
+   // Sync unconditionally - this is called once per lifetime.
+   proxier.syncProxyRules()
+}
+```
+
+
+
+**syncProxyRules 函数会等待 proxier.servicesSynced 和 proxier.endpointsSynced 两者都同步成功后，才会运行，而且只会在启动时候运行一次。**
+
+
+
+```go
+// This is where all of the iptables-save/restore calls happen.
+// The only other iptables rules are those that are setup in iptablesInit()
+// This assumes proxier.mu is NOT held
+func (proxier *Proxier) syncProxyRules() {
+	// ...
+    // 在该函数中完成了iptables的配置过程，主要是在nat表和filter表上挂载相关的自定义链条
+}
+```
+
+
+
+![iptables](http://img.blog.csdn.net/20160426113327690)
 
 ### EndpointsConfig创建和运行
 
@@ -312,7 +349,7 @@ func (c *EndpointsConfig) Run(stopCh <-chan struct{}) {
 	}
 
 	for i := range c.eventHandlers {
-		c.eventHandlers[i].OnEndpointsSynced()
+		c.eventHandlers[i].OnEndpointsSynced() // 此处实现的是观察者模式，观察者为 proxierIPTables
 	}
 
 	<-stopCh
@@ -324,6 +361,21 @@ func (c *EndpointsConfig) Run(stopCh <-chan struct{}) {
 Proxier 实现了 ServiceHandler 和 EndpointsHandler 的接口。
 
 ### s.Proxier.SyncLoop() 
+
+
+
+由于 Proxier 实现了 services 和 endpoints 事件各种最终的观察者，最终的事件触发都会在 proxier 中进行处理。对于通过监听 API Server 变化的信息，Proxier 会将变化的信息以 namespace 为 key 保存到 endpointsChanges 和 serviceChanges。然后启动定时器定期触发 proxier.syncProxyRules 完成增量更新全部同步到 iptables 中。syncRunner 充当了定时运行和刷新的功能。
+
+
+
+> ```
+> // endpointsChanges and serviceChanges contains all changes to endpoints and
+> // services that happened since iptables was synced. For a single object,
+> // changes are accumulated, i.e. previous is state from before all of them,
+> // current is state after applying all of those.
+> ```
+
+
 
 k8s.io/kubernetes/pkg/proxy/iptables/proxier.go
 
@@ -424,7 +476,7 @@ func (bfr *BoundedFrequencyRunner) tryRun() {
 }
 ```
 
-Run() -> bfr.tryRun()
+通过 Run() 函数来触发一个channel event, 然后接收到这个event后再去调用bfr.tryRun() 函数，从而完成了异步Run() -> bfr.tryRun()的实现。
 ```go
 func (bfr *BoundedFrequencyRunner) Run() {
 	// If it takes a lot of time to run the underlying function, noone is really
@@ -441,6 +493,7 @@ func (bfr *BoundedFrequencyRunner) Run() {
 ```go
 func (proxier *Proxier) OnEndpointsAdd(endpoints *api.Endpoints) {
 	namespacedName := types.NamespacedName{Namespace: endpoints.Namespace, Name: endpoints.Name}
+     // proxier.endpointsChanges.update 将 变化的 endpoints 对象保存到 endpointsChanges 集合中
 	if proxier.endpointsChanges.update(&namespacedName, nil, endpoints) && proxier.isInitialized(){
 		// 传递一个信号过去，调用 BoundedFrequencyRunner::tryRun()
 		proxier.syncRunner.Run() 
