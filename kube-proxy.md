@@ -283,7 +283,7 @@ func (proxier *Proxier) OnServiceSynced() {
 
 
 
-**syncProxyRules 函数会等待 proxier.servicesSynced 和 proxier.endpointsSynced 两者都同步成功后，才会运行，而且只会在启动时候运行一次。**
+**syncProxyRules 函数会等待 proxier.servicesSynced 和 proxier.endpointsSynced 两者都同步成功后，才会运行，会在启动时候运行一次，后续会开启定时的全量同步。**
 
 
 
@@ -300,6 +300,20 @@ func (proxier *Proxier) syncProxyRules() {
 
 
 ![iptables](http://img.blog.csdn.net/20160426113327690)
+
+
+
+Service 安装相关的位置：
+
+* ChainInput                Filter
+
+* ChainOutput             Filter  Nat
+
+* ChainPrerouting       Nat
+
+  ​
+
+  ![srv](img/iptable.jpg)
 
 ### EndpointsConfig创建和运行
 
@@ -361,8 +375,6 @@ func (c *EndpointsConfig) Run(stopCh <-chan struct{}) {
 Proxier 实现了 ServiceHandler 和 EndpointsHandler 的接口。
 
 ### s.Proxier.SyncLoop() 
-
-
 
 由于 Proxier 实现了 services 和 endpoints 事件各种最终的观察者，最终的事件触发都会在 proxier 中进行处理。对于通过监听 API Server 变化的信息，Proxier 会将变化的信息以 namespace 为 key 保存到 endpointsChanges 和 serviceChanges。然后启动定时器定期触发 proxier.syncProxyRules 完成增量更新全部同步到 iptables 中。syncRunner 充当了定时运行和刷新的功能。
 
