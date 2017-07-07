@@ -299,6 +299,8 @@ func (proxier *Proxier) syncProxyRules() {
 
 
 
+From [Kubernetes1.2如何使用iptables](http://blog.csdn.net/horsefoot/article/details/51249161)
+
 ![iptables](http://img.blog.csdn.net/20160426113327690)
 
 
@@ -314,6 +316,10 @@ Service 安装相关的位置：
   ​
 
   ![srv](img/iptable.jpg)
+
+
+
+![](img/iptables_k8s.png)
 
 ### EndpointsConfig创建和运行
 
