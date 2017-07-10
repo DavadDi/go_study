@@ -294,6 +294,10 @@ func (proxier *Proxier) OnServiceSynced() {
 func (proxier *Proxier) syncProxyRules() {
 	// ...
     // 在该函数中完成了iptables的配置过程，主要是在nat表和filter表上挂载相关的自定义链条
+    // 1. 确保 K8S 自定义 chain 存在于相对应的位置
+    // 2. 读取当前 iptables 当前的信息，然后分析到各个Table进行保存
+    // 3. 将当前保存的 service 相关信息 保存到 proxier.iptablesData 中
+    // 4. 采用 proxier.iptables.RestoreAll 函数将新的 iptables 信息写入 
 }
 ```
 
