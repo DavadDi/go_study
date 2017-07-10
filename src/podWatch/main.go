@@ -35,7 +35,7 @@ func getClientsetOrDie(kubeconfig string) *kubernetes.Clientset {
 func main() {
 	kubeconfig := flag.String("kubeconfig", "", "Path to a kube config. Only required if out-of-cluster.")
 	flag.Parse()
-	controller := newServiceLookupController(*kubeconfig)
+	controller := newPodWatchController(*kubeconfig)
 	var stopCh <-chan struct{}
 	controller.Run(2, stopCh)
 }
@@ -123,7 +123,7 @@ func (slm *podWatcherCtrl) podWorker() {
 	}
 }
 
-func newServiceLookupController(kubeconfig string) *podWatcherCtrl {
+func newPodWatchController(kubeconfig string) *podWatcherCtrl {
 	slm := &podWatcherCtrl{
 		kubeClient: getClientsetOrDie(kubeconfig),
 		podsQueue:  workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "pods"),
