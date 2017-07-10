@@ -1,5 +1,7 @@
 # Kube-proxy 源码分析
 
+[TOC]
+
 ## 1. Kube-proxy 入口函数
 
 k8s.io/kubernetes/cmd/kube-proxy/proxy.go
@@ -210,7 +212,7 @@ func (s *ProxyServer) Run() error {
 
 k8s.io/kubernetes/pkg/proxy/config/config.go
 
-### ServiceConfig创建和运行
+## 2.  ServiceConfig创建和运行
 
 ```go
 // NewServiceConfig creates a new ServiceConfig.
@@ -325,7 +327,7 @@ Service 安装相关的位置：
 
 ![](img/iptables_k8s.png)
 
-### EndpointsConfig创建和运行
+## 3. EndpointsConfig创建和运行
 
 ```go
 
@@ -384,7 +386,7 @@ func (c *EndpointsConfig) Run(stopCh <-chan struct{}) {
 
 Proxier 实现了 ServiceHandler 和 EndpointsHandler 的接口。
 
-### s.Proxier.SyncLoop() 
+## 4. s.Proxier.SyncLoop() 
 
 由于 Proxier 实现了 services 和 endpoints 事件各种最终的观察者，最终的事件触发都会在 proxier 中进行处理。对于通过监听 API Server 变化的信息，Proxier 会将变化的信息以 namespace 为 key 保存到 endpointsChanges 和 serviceChanges。然后启动定时器定期触发 proxier.syncProxyRules 完成增量更新全部同步到 iptables 中。syncRunner 充当了定时运行和刷新的功能。
 
