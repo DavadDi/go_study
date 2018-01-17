@@ -956,6 +956,8 @@ $ kubectl port-forward -n weave "$(kubectl get -n weave pod --selector=weave-sco
 
 ## 9. 安装过程中遇到的错误
 
+### crictl not found
+
 `crictl not found in system path` https://github.com/kubernetes-incubator/cri-tools，需要自己编译安装
 
 ```shell
@@ -1022,6 +1024,8 @@ crictl version 1.0.0-alpha.0
 
 
 
+### running with swap on is not supported
+
 一个警告信息是 `crictl not found in system path`，另一个错误信息是 `running with swap on is not supported. Please disable swap`。因为我们前面已经修改了kubelet的启动参数，所以重新添加 `–ignore-preflight-errors=Swap` 参数忽略这个错误，重新运行。或者使用 `swapoff -a` 临时全局关闭，可能会影响运行的服务。
 
 ```shell
@@ -1049,6 +1053,91 @@ Jan 09 17:50:56 localhost.localdomain systemd[1]: Unit docker.service entered fa
 Jan 09 17:50:56 localhost.localdomain systemd[1]: docker.service failed.
 ```
 
+
+
+### system:anonymous" cannot get path
+
+不能访问 API-Server 遇到 `system:anonymous" cannot get path`:
+
+```json
+{
+   kind: "Status",
+   apiVersion: "v1",
+   metadata: { },
+   status: "Failure",
+   message: "forbidden: User "system:anonymous" cannot get path "/"",
+   reason: "Forbidden",
+   details: { },
+   code: 403
+}
+```
+
+
+
+**解决方式1：**
+
+```shell
+$ kubectl proxy --address='0.0.0.0' --port=30099 --accept-hosts='^*$'
+$ http://172.16.132.100:30099/api/v1/proxy/nodes/node1/metrics
+```
+
+
+
+**解决方式2：**
+
+![](https://d33wubrfki0l68.cloudfront.net/673dbafd771491a080c02c6de3fdd41b09623c90/50100/images/docs/admin/access-control-overview.svg)
+
+参见 [Kubernetes集群安全：Api Server认证](https://blog.frognew.com/2017/01/kubernetes-api-server-authc.html#%E7%94%9F%E6%88%90%E5%AE%A2%E6%88%B7%E7%AB%AF%E7%A7%81%E9%92%A5%E5%92%8C%E8%AF%81%E4%B9%A6)
+
+添加 [ServiceAccount](https://stackoverflow.com/questions/45094665/user-systemanonymous-cannot-get-path)，参考 [在Kubernetes Pod中使用Service Account访问API Server](http://tonybai.com/2017/03/03/access-api-server-from-a-pod-through-serviceaccount/)
+
+ServiceAccount 是一种账号，但是不是为集群用户（管理员、运维人员等）使用的，而是给运行在集群中的 Pod 里面的进程使用的。
+
+
+
+留作备注，暂时不用
+
+```shell
+$ kubectl get serviceaccount --all-namespaces
+$ kubectl describe serviceaccount/default -n kube-system
+Name:                default
+Namespace:           kube-system
+Labels:              <none>
+Annotations:         <none>
+Image pull secrets:  <none>
+Mountable secrets:   default-token-vpq4x
+Tokens:              default-token-vpq4x
+Events:              <none>
+
+$  kubectl get secret/default-token-vpq4x  -n kube-system
+NAME                  TYPE                                  DATA      AGE
+default-token-vpq4x   kubernetes.io/service-account-token   3         22h
+
+$ kubectl get secret/default-token-vpq4x  -o yaml -n kube-system
+kubectl get secret/default-token-vpq4x  -n kube-system -o yaml
+apiVersion: v1
+data:
+  ca.crt: {{ base64 encoded }}
+  namespace: a3ViZS1zeXN0ZW0=  # echo -n "a3ViZS1zeXN0ZW0="|base64 = kube-system
+  token: {{ base64 encoded }}
+kind: Secret
+metadata:
+  annotations:
+    kubernetes.io/service-account.name: default
+    kubernetes.io/service-account.uid: 1bd3a7d0-fa85-11e7-9d32-000c2975be81
+  creationTimestamp: 2018-01-16T06:18:46Z
+  name: default-token-vpq4x
+  namespace: kube-system
+  resourceVersion: "313"
+  selfLink: /api/v1/namespaces/kube-system/secrets/default-token-vpq4x
+  uid: 1be19e7c-fa85-11e7-9d32-000c2975be81
+type: kubernetes.io/service-account-token
+```
+
+
+
+
+
 ## 10. 涉及到的Image列表
 
 ```shell
@@ -1072,6 +1161,63 @@ docker.io/radial/busyboxplus:curl                                4.212 MB
 
 
 
+**补充：** 
+
+用户证书登录与授权分别参见：[Kubernetes集群安全：Api Server认证](https://blog.frognew.com/2017/01/kubernetes-api-server-authc.html#http-basic%E8%AE%A4%E8%AF%81) 生成用户证书和[Using RBAC Authorization](https://kubernetes.io/docs/admin/authorization/rbac/#kubectl-create-rolebinding)
+
+
+
+```shell
+$ cd /etc/kubernetes/pki/
+$ openssl genrsa -out diwh.key 2048
+$ openssl req -new -key diwh.key -subj "/CN=diwh" -out diwh.csr
+$ openssl x509 -req -in diwh.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out diwh.crt -days 3650
+$ sz ca.crt diwh.key diwh.crt
+
+# 设置 pod-reader role
+$ cat pod-reader.yaml
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  namespace: default
+  name: pod-reader
+rules:
+- apiGroups: [""] # "" indicates the core API group
+  resources: ["pods"]
+  verbs: ["get", "watch", "list"]
+
+# 绑定 role 到 user diwh
+$ cat roleBinding_diwh.yaml
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: read-pods
+  namespace: default
+subjects:
+- kind: User
+  name: diwh
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: pod-reader
+  apiGroup: rbac.authorization.k8s.io
+
+# 连接使用
+# 不具备 configmap，期望失败
+$ kubectl --server=https://172.16.132.100:6443 --certificate-authority=ca.crt --client-certificate=diweihua.crt --client-key=diweihua.key  get configmap
+Error from server (Forbidden): configmaps is forbidden: User "diweihua" cannot list configmaps in the namespace "default"
+
+# 访问 pod，期望成功
+$ kubectl --server=https://172.16.132.100:6443 --certificate-authority=ca.crt --client-certificate=diweihua.crt --client-key=diweihua.key  get pods
+NAME                                READY     STATUS    RESTARTS   AGE
+curl-545bbf5f9c-g28fr               1/1       Running   0          1d
+nginx-deployment-6c54bd5869-8t2xt   1/1       Running   0          1d
+nginx-deployment-6c54bd5869-hh2ft   1/1       Running   2          1d
+
+```
+
+
+
 ## 11. 参考
 
 1. [使用kubeadm安装Kubernetes 1.9](https://blog.frognew.com/2017/12/kubeadm-install-kubernetes-1.9.html#7%E5%90%91kubernetes%E9%9B%86%E7%BE%A4%E6%B7%BB%E5%8A%A0node)
@@ -1089,3 +1235,4 @@ docker.io/radial/busyboxplus:curl                                4.212 MB
 13. [Customize the docker0 bridge](https://docs.docker.com/engine/userguide/networking/default_network/custom-docker0/)
 14. [CentOS / RHEL 7 : How to disable IPv6](https://www.thegeekdiary.com/centos-rhel-7-how-to-disable-ipv6/)
 15. [k8s 中文网站](http://kubernetes.kansea.com/)
+16. [升级Dashboard](https://jimmysong.io/posts/kubernetes-dashboard-upgrade/)
