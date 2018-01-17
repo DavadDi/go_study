@@ -1,4 +1,4 @@
-# Kubeadm @Centos 7.4 安装 Kubernetes 1.9.1
+# Kubeadm@Centos 7.4 安装 Kubernetes 1.9.1
 
 [TOC]
 
@@ -30,6 +30,12 @@ kubeadm 是官方提供的工具，用于快速安装一个最小运行的 Clust
 > | k8s.gcr.io/k8s-dns-dnsmasq-nanny-${ARCH} | 1.14.5                      | 1.14.7                      |
 
 > 如果在阿里云上安装，也可以采用阿里云提供的镜像，可能镜像同步会有滞后：[阿里云快速部署Kubernetes - VPC环境](https://yq.aliyun.com/articles/66474) [阿里云 kubernetes yum 仓库镜像](https://ieevee.com/tech/2017/09/17/k8s-yum-mirror.html)
+
+
+
+本地安装K8S可以通过 Minikube 与 Kubeadm，Minikube 使用虚拟机的方式，非常方便，但是只能安装单节点的集群，对于最新的 K8S 版本支持有点滞后，因此如果使用最新版本的话 Kubeadm 更加方便。
+
+![](https://jimmysong.io/kubernetes-handbook/images/kubernetes-high-level-component-archtecture.jpg)
 
 
 
@@ -238,7 +244,7 @@ Registries: docker.io (secure)
 
 
 
-可选： **安装 Docker CE版本** 一般用于最新版本验证
+**可选：** **安装 Docker CE版本** 一般用于最新版本验证
 
 ```
 $ yum install -y yum-utils device-mapper-persistent-data lvm2
@@ -586,6 +592,10 @@ gcr.io/google_containers/pause-amd64                     3.0                 99e
 **设置用户的 kubectl 环境**
 
 ```shell
+# 如果为 root 用户
+$ export KUBECONFIG=/etc/kubernetes/admin.conf
+
+# 如果是非root用户
 $ mkdir -p $HOME/.kube
 $ cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
 $ chown $(id -u):$(id -g) $HOME/.kube/config
@@ -611,11 +621,27 @@ NAME                 STATUS    MESSAGE              ERROR
 scheduler            Healthy   ok
 controller-manager   Healthy   ok
 etcd-0               Healthy   {"health": "true"}
+
+$ kubectl get pods --all-namespaces -o wide
 ```
 
 
 
+默认情况下 Master 节点不进行 Pod 调度，为了方便测试，我们可以通过以下命令让 Master 参与调度：
+
+```shell
+$ kubectl taint nodes --all node-role.kubernetes.io/master-
+```
+
+
+
+更多问题排查参见：[Troubleshooting kubeadm](https://kubernetes.io/docs/setup/independent/troubleshooting-kubeadm/)
+
 ## 6. 安装 Pod Network
+
+> **The network must be deployed before any applications. Also, kube-dns, an internal helper service, will not start up before a network is installed. kubeadm only supports Container Network Interface (CNI) based networks (and does not support kubenet).**
+>
+> — From https://kubernetes.io/docs/setup/independent/create-cluster-kubeadm/
 
 本文选择 Flannel 作为 Pod Network，默认网段已经通过 init 参数 `--pod-network-cidr=10.244.0.0/16`指定。由于 kube-flannel.yml 中以 DaemonSet 方式运行的，能够保证每个新加如 Node 自动运行 Flannel， 因此只需要在 Master 节点上运行即可。
 
@@ -669,22 +695,12 @@ $ ip link delete flannel.1
 $ rm -rf /var/lib/cni/
 ```
 
-
-
-默认情况下 Master 节点不进行 Pod 调度，为了方便测试，我们可以通过以下命令让 Master 参与调度：
-
-```shell
-$ kubectl taint nodes --all node-role.kubernetes.io/master-
-```
-
-
-
 测试 dns 和  nginx
 
 ![](https://www.kubernetes.org.cn/img/2016/10/20161028145516.jpg)
 
 ```shell
-# curl 工具
+# curl 工具，不需要翻墙
 $ kubectl run curl --image=radial/busyboxplus:curl -i --tty
 $ nslookup kubernetes.default
 Server:    10.96.0.10
@@ -750,6 +766,15 @@ This node has joined the cluster:
 Run 'kubectl get nodes' on the master to see this node join the cluster.
 
 ```
+
+在 Master 节点上参看 Node 状态：
+
+```shell
+# join 的过程，需要下载镜像等准备工作，需要一定时间
+$ kubectl get nodes
+```
+
+
 
 
 
@@ -902,6 +927,33 @@ monitoring-grafana     NodePort    10.103.229.66   <none>        80:32447/TCP   
 
 使用 http://172.16.132.10:32447/?orgId=1 则可以看到 Grafana 的界面，可以通过📈来查看集群中的各类资源信息。
 
+### Weave Scope
+
+[Weaveworks](https://www.weave.works/) 公司开源的四大组件，简化容器和微服务的部署、监控和管理，包括：
+
+* Weave Net：创建了一个虚拟的覆盖网，它连接跨多个主机的Docker容器，模拟一个完整的两层网络，使应用可以像容器全部接入同一网络交换机一样来使用网络，不必配置端口映射、大使或挎斗（ambassadors/sidecar ）容器或链路。
+* Weave Scope：Weave Scope为容器调度器（比如Kubernetes）内正在运行的容器自动化地生成一个实时映射，这使人工操作可视化、可监控，并检查网络通信和相关的度量。
+* Weave Flux：使容器镜像的持续交付成为可能。Weave Flux可以查询容器调度器部署的当前状态和容器镜像的上一个版本，并且，如果检测到新的版本将执行自动化部署。
+* Weave Cortex：是一个兼容 [Prometheus](https://prometheus.io/) 容器监控实现的API，它原生支持多租户和水平扩展的集群。
+
+> Weave Scope为容器调度器（比如Kubernetes）内正在运行的容器自动化地生成一个实时映射，这使人工操作可视化、可监控，并检查网络通信和相关的度量。Weave Scope提供了一个个体应用容器以及整个基础设施的视图，它可以让你更轻松地诊断分布式集装箱内应用的潜在问题。
+>
+> From: [Weaveworks增加发布自动化和事件管理](http://www.infoq.com/cn/news/2017/05/weave-cloud-enterprise)
+
+From: https://www.weave.works/docs/scope/latest/installing/#k8s
+
+**Without Weave Cloud (run Scope in standalone mode)**
+
+```shell
+$ kubectl apply --namespace weave -f "https://cloud.weave.works/k8s/scope.yaml?k8s-version=$(kubectl version | base64 | tr -d '\n')"
+
+$ kubectl port-forward -n weave "$(kubectl get -n weave pod --selector=weave-scope-component=app -o jsonpath='{.items..metadata.name}')" 9090
+
+# 或者直接修改 Service，暴露出 NodePort
+```
+
+![](http://www.do1618.com/wp-content/uploads/2018/01/weave_scope.png)
+
 ## 9. 安装过程中遇到的错误
 
 `crictl not found in system path` https://github.com/kubernetes-incubator/cri-tools，需要自己编译安装
@@ -999,7 +1051,7 @@ Jan 09 17:50:56 localhost.localdomain systemd[1]: docker.service failed.
 
 ## 10. 涉及到的Image列表
 
-```
+```shell
 gcr.io/google_containers/kube-apiserver-amd64:v1.9.1             210.4 MB
 gcr.io/google_containers/kube-scheduler-amd64:v1.9.1             62.7 MB
 gcr.io/google_containers/kube-proxy-amd64:v1.9.1                 109.1 MB
@@ -1016,7 +1068,6 @@ k8s.gcr.io/heapster-influxdb-amd64:v1.3.3                        12.55 MB
 k8s.gcr.io/heapster-grafana-amd64:v4.4.3                         151.5 MB
 k8s.gcr.io/heapster-amd64:v1.4.2                                  73.4 MB
 docker.io/radial/busyboxplus:curl                                4.212 MB
-
 ```
 
 
@@ -1037,3 +1088,4 @@ docker.io/radial/busyboxplus:curl                                4.212 MB
 12. [Build your own bridge](https://docs.docker.com/engine/userguide/networking/default_network/build-bridges/)
 13. [Customize the docker0 bridge](https://docs.docker.com/engine/userguide/networking/default_network/custom-docker0/)
 14. [CentOS / RHEL 7 : How to disable IPv6](https://www.thegeekdiary.com/centos-rhel-7-how-to-disable-ipv6/)
+15. [k8s 中文网站](http://kubernetes.kansea.com/)
