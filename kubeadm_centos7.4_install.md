@@ -1169,8 +1169,14 @@ docker.io/radial/busyboxplus:curl                                4.212 MB
 
 ```shell
 $ cd /etc/kubernetes/pki/
+# 查看根证书
+$ openssl x509 -noout -text -in ca.crt
+
+# 验证证书
+$ openssl verify -CAfile ca.crt apiserver.crt
+
 $ openssl genrsa -out diwh.key 2048
-$ openssl req -new -key diwh.key -subj "/CN=diwh" -out diwh.csr
+$ openssl req -new -key diwh.key -subj "/CN=diwh/O=kube-user" -out diwh.csr
 $ openssl x509 -req -in diwh.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out diwh.crt -days 3650
 $ sz ca.crt diwh.key diwh.crt
 
@@ -1204,11 +1210,11 @@ roleRef:
 
 # 连接使用
 # 不具备 configmap，期望失败
-$ kubectl --server=https://172.16.132.100:6443 --certificate-authority=ca.crt --client-certificate=diweihua.crt --client-key=diweihua.key  get configmap
-Error from server (Forbidden): configmaps is forbidden: User "diweihua" cannot list configmaps in the namespace "default"
+$ kubectl --server=https://172.16.132.100:6443 --certificate-authority=ca.crt --client-certificate=diwh.crt --client-key=diwh.key  get configmap
+Error from server (Forbidden): configmaps is forbidden: User "diwh" cannot list configmaps in the namespace "default"
 
 # 访问 pod，期望成功
-$ kubectl --server=https://172.16.132.100:6443 --certificate-authority=ca.crt --client-certificate=diweihua.crt --client-key=diweihua.key  get pods
+$ kubectl --server=https://172.16.132.100:6443 --certificate-authority=ca.crt --client-certificate=diwh.crt --client-key=diwh.key  get pods
 NAME                                READY     STATUS    RESTARTS   AGE
 curl-545bbf5f9c-g28fr               1/1       Running   0          1d
 nginx-deployment-6c54bd5869-8t2xt   1/1       Running   0          1d
@@ -1236,3 +1242,4 @@ nginx-deployment-6c54bd5869-hh2ft   1/1       Running   2          1d
 14. [CentOS / RHEL 7 : How to disable IPv6](https://www.thegeekdiary.com/centos-rhel-7-how-to-disable-ipv6/)
 15. [k8s 中文网站](http://kubernetes.kansea.com/)
 16. [升级Dashboard](https://jimmysong.io/posts/kubernetes-dashboard-upgrade/)
+17. [最新实践 | 将Docker网络方案进行到底](http://blog.shurenyun.com/shurenyun-docker-133/)
