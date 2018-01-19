@@ -4,6 +4,8 @@
 
 代码基于 1.6 版本
 
+![](https://feisky.gitbooks.io/kubernetes/components/images/kubelet.png)
+
 ## 1. kubelet 整体流程
 
 k8s.io/kubernetes/cmd/kubelet/kubelet.go
