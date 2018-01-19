@@ -1,5 +1,9 @@
 # kubelet 源码分析
 
+[TOC]
+
+代码基于 1.6 版本
+
 ## 1. kubelet 整体流程
 
 k8s.io/kubernetes/cmd/kubelet/kubelet.go
@@ -1463,3 +1467,188 @@ func (m *manager) SetContainerReadiness(podUID types.UID, containerID kubecontai
 	m.updateStatusInternal(pod, status, false)
 }
 ```
+
+
+## 7. Kebelet Server 
+
+代码基于 1.9.2
+
+```go
+func startKubelet(k kubelet.Bootstrap, podCfg *config.PodConfig, kubeCfg *kubeletconfiginternal.KubeletConfiguration, kubeDeps *kubelet.Dependencies) {
+	// start the kubelet
+	go wait.Until(func() { k.Run(podCfg.Updates()) }, 0, wait.NeverStop)
+
+	// start the kubelet server 默认端口  10250
+	if kubeCfg.EnableServer {
+		go wait.Until(func() {
+			k.ListenAndServe(
+              net.ParseIP(kubeCfg.Address), 
+              uint(kubeCfg.Port), 
+              kubeDeps.TLSOptions, 
+              kubeDeps.Auth, 
+              kubeCfg.EnableDebuggingHandlers, 
+              kubeCfg.EnableContentionProfiling)
+		}, 0, wait.NeverStop)
+	}
+  
+    // 默认端口 10255
+	if kubeCfg.ReadOnlyPort > 0 {
+		go wait.Until(func() {
+			k.ListenAndServeReadOnly(net.ParseIP(kubeCfg.Address), uint(kubeCfg.ReadOnlyPort))
+		}, 0, wait.NeverStop)
+	}
+}
+```
+
+
+
+k8s.io/kubernetes/pkg/kubelet/kubelet.go
+
+```go
+// Bootstrap is a bootstrapping interface for kubelet, targets the initialization protocol
+type Bootstrap interface {
+     // ...
+	ListenAndServe(address net.IP, port uint, tlsOptions *server.TLSOptions, auth server.AuthInterface, enableDebuggingHandlers, enableContentionProfiling bool)
+    ListenAndServeReadOnly(address net.IP, port uint)
+	// ...
+}
+```
+
+
+
+此处先分析 `ListenAndServeReadOnly`:
+
+```go
+// ListenAndServeReadOnly runs the kubelet HTTP server in read-only mode.
+func (kl *Kubelet) ListenAndServeReadOnly(address net.IP, port uint) {
+	server.ListenAndServeKubeletReadOnlyServer(kl, kl.resourceAnalyzer, address, port, kl.containerRuntime)
+}
+```
+
+
+
+文件 k8s.io/kubernetes/pkg/kubelet/server/server.go
+
+**ListenAndServeKubeletReadOnlyServer(...)**
+
+```go
+// ListenAndServeKubeletReadOnlyServer initializes a server to respond to HTTP network requests on the Kubelet.
+func ListenAndServeKubeletReadOnlyServer(host HostInterface, resourceAnalyzer stats.ResourceAnalyzer, address net.IP, port uint, runtime kubecontainer.Runtime) {
+	glog.V(1).Infof("Starting to listen read-only on %s:%d", address, port)
+	s := NewServer(host, resourceAnalyzer, nil, false, false, runtime, nil)
+
+	server := &http.Server{
+		Addr:           net.JoinHostPort(address.String(), strconv.FormatUint(uint64(port), 10)),
+		Handler:        &s,  // 设置成了 NewServer 返回值
+		MaxHeaderBytes: 1 << 20,
+	}
+	glog.Fatal(server.ListenAndServe())
+}
+
+// 因为是 Http 服务，这里重点分析 NewServer(...) 返回的结果， 因为 http.Server 中的 Handler 为返回值。
+
+func NewServer(...) Server {
+	server := Server{
+		host:             host,
+		resourceAnalyzer: resourceAnalyzer,
+		auth:             auth,
+		restfulCont:      &filteringContainer{Container: restful.NewContainer()},
+		runtime:          runtime,
+	}
+    
+     if auth != nil {
+         // 安装Auth Filter
+		server.InstallAuthFilter()  
+	}
+  
+    // 安装 Default Handlers
+	server.InstallDefaultHandlers()  
+ 
+    // 根据debug flag来确定是否启动调试handler
+	if enableDebuggingHandlers {
+		server.InstallDebuggingHandlers(criHandler)
+		if enableContentionProfiling {
+			goruntime.SetBlockProfileRate(1)
+		}
+	} else {
+		server.InstallDebuggingDisabledHandlers()
+	}
+  
+	return server
+}
+
+// ServeHTTP responds to HTTP requests on the Kubelet.
+func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+    // ...
+	s.restfulCont.ServeHTTP(w, req)
+}
+```
+
+
+
+```go
+type Server struct {
+	auth             AuthInterface
+	host             HostInterface
+	restfulCont      containerInterface  // 真正的 Http Server 服务对象
+	resourceAnalyzer stats.ResourceAnalyzer
+	runtime          kubecontainer.Runtime
+}
+
+// containerInterface defines the restful.Container functions used on the root container
+type containerInterface interface {
+	Add(service *restful.WebService) *restful.Container
+	Handle(path string, handler http.Handler)
+	Filter(filter restful.FilterFunction)
+	ServeHTTP(w http.ResponseWriter, r *http.Request)
+	RegisteredWebServices() []*restful.WebService
+
+	// RegisteredHandlePaths returns the paths of handlers registered directly with the container (non-web-services)
+	// Used to test filters are being applied on non-web-service handlers
+	RegisteredHandlePaths() []string
+}
+```
+
+
+
+**真正处理 默认 Restful 的函数：**
+
+```go
+const (
+	metricsPath         = "/metrics"
+	cadvisorMetricsPath = "/metrics/cadvisor"
+	specPath            = "/spec/"
+	statsPath           = "/stats/"
+	logsPath            = "/logs/"
+)
+
+// InstallDefaultHandlers registers the default set of supported HTTP request
+// patterns with the restful Container.
+func (s *Server) InstallDefaultHandlers() {
+	healthz.InstallHandler(s.restfulCont,
+		healthz.PingHealthz,
+		healthz.NamedCheck("syncloop", s.syncLoopHealthCheck),
+	)
+	ws := new(restful.WebService)
+	// http://xxx:10250/pods
+	ws.Path("/pods").Produces(restful.MIME_JSON)
+	ws.Route(ws.GET("").To(s.getPods).Operation("getPods"))
+	s.restfulCont.Add(ws)
+   
+	s.restfulCont.Add(stats.CreateHandlers(statsPath /*/stats/*/, s.host, s.resourceAnalyzer))
+	s.restfulCont.Handle(metricsPath/*/metrics*/, prometheus.Handler())
+
+	// cAdvisor metrics are exposed under the secured handler as well
+	r := prometheus.NewRegistry()
+	r.MustRegister(metrics.NewPrometheusCollector(prometheusHostAdapter{s.host}, containerPrometheusLabels))
+	s.restfulCont.Handle(cadvisorMetricsPath, /*/metrics/cadvisor*/
+		promhttp.HandlerFor(r, promhttp.HandlerOpts{ErrorHandling: promhttp.ContinueOnError}),
+	)
+
+	ws = new(restful.WebService)
+	ws.Path(specPath/*spec*/).Produces(restful.MIME_JSON)
+	ws.Route(ws.GET("").To(s.getSpec).Operation("getSpec").Writes(cadvisorapi.MachineInfo{}))
+	s.restfulCont.Add(ws)
+}
+```
+

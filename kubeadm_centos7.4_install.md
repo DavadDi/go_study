@@ -60,13 +60,15 @@ kubeadm 是官方提供的工具，用于快速安装一个最小运行的 Clust
 | TCP      | Inbound   | 10252      | kube-controller-manager |
 | TCP      | Inbound   | 10255      | Read-only Kubelet API   |
 
- **Worker node(s)**
+ **Worker node(s)**  [kubernetes 简介: kubelet 和 pod](http://cizixs.com/2016/10/25/kubernetes-intro-kubelet)
 
-| Protocol | Direction | Port Range  | Purpose               |
-| -------- | --------- | ----------- | --------------------- |
-| TCP      | Inbound   | 10250       | Kubelet API           |
-| TCP      | Inbound   | 10255       | Read-only Kubelet API |
-| TCP      | Inbound   | 30000-32767 | NodePort Services     |
+| Protocol | Direction | Port Range  | Purpose                                  |
+| -------- | --------- | ----------- | ---------------------------------------- |
+| TCP      | Inbound   | 10250       | Kubelet API                              |
+| TCP      | Inbound   | 10255       | Read-only Kubelet API <br />http://xxx:10255/pods or /spec/ or /stats |
+| TCP      | Inbound   | 4194        | [cAdvisor](https://github.com/google/cadvisor),  配置成0，则禁用 |
+| TCP      | Inbound   | 10248       | localhost healthz endpoint               |
+| TCP      | Inbound   | 30000-32767 | NodePort Services                        |
 
 **在 Master 主机上设置相关指令：**
 
@@ -896,6 +898,8 @@ kubernetes-dashboard   NodePort    10.111.165.62   <none>        443:31290/TCP  
 ### Heapster
 
 Heapster为集群添加使用统计和监控功能，为Dashboard添加仪表盘。 使用InfluxDB做为Heapster的后端存储。
+
+![](https://d33wubrfki0l68.cloudfront.net/a5c0d5e887a336fb0c686b3a6c436b21d51588a4/8e530/images/docs/monitoring-architecture.png)
 
 ```shell
 $ mkdir -p ~/k8s/heapster
