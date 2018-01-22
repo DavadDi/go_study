@@ -1518,6 +1518,88 @@ type Bootstrap interface {
 
 
 
+总览：
+
+```go
+// ListenAndServeKubeletServer initializes a server to respond to HTTP network requests on the Kubelet.
+func ListenAndServeKubeletServer(
+	host HostInterface,
+	resourceAnalyzer stats.ResourceAnalyzer,
+	address net.IP,
+	port uint,
+	tlsOptions *TLSOptions,
+	auth AuthInterface,
+	enableDebuggingHandlers,
+	enableContentionProfiling bool,
+	runtime kubecontainer.Runtime,
+	criHandler http.Handler) {
+  
+	handler := NewServer(host, resourceAnalyzer, auth, enableDebuggingHandlers, enableContentionProfiling, runtime, criHandler)
+  
+	s := &http.Server{
+		Addr:           net.JoinHostPort(address.String(), 
+                                         strconv.FormatUint(uint64(port), 10)),
+		Handler:        &handler,
+		MaxHeaderBytes: 1 << 20,
+	}
+    
+    s.ListenAndServe())
+}
+
+// ListenAndServeKubeletReadOnlyServer initializes a server to respond to HTTP network requests on the Kubelet.
+func ListenAndServeKubeletReadOnlyServer(host HostInterface, 
+									resourceAnalyzer stats.ResourceAnalyzer, 
+									address net.IP, 
+									port uint, 
+									runtime kubecontainer.Runtime) {
+	
+     s := NewServer(host, resourceAnalyzer, nil, false, false, runtime, nil)
+
+	server := &http.Server{
+		Addr:           net.JoinHostPort(address.String(), 
+                                         strconv.FormatUint(uint64(port), 10)),
+		Handler:        &s,
+		MaxHeaderBytes: 1 << 20,
+	}
+  
+	server.ListenAndServe()
+}
+```
+
+
+
+通过以上对比可以发现， 10250 与 10255（ReadyOnly）最终调用的是用同一个对象，但是传入的参数不同
+
+```go
+func ListenAndServeKubeletServer() ... {
+  // ...
+  handler := NewServer(host, resourceAnalyzer, auth, enableDebuggingHandlers, enableContentionProfiling, runtime, criHandler)
+  // ...
+}
+
+func ListenAndServeKubeletReadOnlyServer() ... {
+    // ...
+    s := NewServer(host, resourceAnalyzer, /*auth*/ nil, /*enableDebuggingHandlers*/ false, /*enableContentionProfiling*/ false, runtime, /*criHandler*/ nil)
+    // ...
+}
+
+// NewServer 函数的原型声明如下：
+func NewServer(
+	host HostInterface,
+	resourceAnalyzer stats.ResourceAnalyzer,
+	auth AuthInterface,
+	enableDebuggingHandlers,
+	enableContentionProfiling bool,
+	runtime kubecontainer.Runtime,
+    criHandler http.Handler)(){
+             // ...
+}
+```
+
+
+
+### 7.1 ListenAndServeReadOnly (10255) 
+
 此处先分析 `ListenAndServeReadOnly`:
 
 ```go
@@ -1652,5 +1734,481 @@ func (s *Server) InstallDefaultHandlers() {
 	ws.Route(ws.GET("").To(s.getSpec).Operation("getSpec").Writes(cadvisorapi.MachineInfo{}))
 	s.restfulCont.Add(ws)
 }
+```
+
+
+
+### 7.2 ListenAndServe
+
+k8s.io/kubernetes/pkg/kubelet/kubelet.go
+
+```go
+// ListenAndServe runs the kubelet HTTP server.
+func (kl *Kubelet) ListenAndServe(
+  address net.IP, 
+  port uint, 
+  tlsOptions *server.TLSOptions, 
+  auth server.AuthInterface, 
+  enableDebuggingHandlers, 
+  enableContentionProfiling bool) {
+	server.ListenAndServeKubeletServer(kl, 
+                                       kl.resourceAnalyzer, 
+                                       address, 
+                                       port, 
+                                       tlsOptions, 
+                                       auth, 
+                                       enableDebuggingHandlers, 
+                                       enableContentionProfiling, 
+                                       // kuberuntime.NewKubeGenericRuntimeManager 
+                                       // ==> KubeGenericRuntime
+                                       // k8s.io/kubernetes/pkg/kubelet/
+                                       // kuberuntime/kuberuntime_manager.go
+                                       kl.containerRuntime,  
+                                       // dockershim.NewDockerService
+                                       kl.criHandler)
+  
+     // type KubeGenericRuntime interface {
+	//	kubecontainer.Runtime
+	//	kubecontainer.IndirectStreamingRuntime
+	//	kubecontainer.ContainerCommandRunner
+	//}	
+}
+
+// 其中 kl.criHandler 在 NewMainKubelet() 函数中被设置成了 dockershim.NewDockerService 对象
+func NewMainKubelet(){
+     // ...
+	// rktnetes cannot be run with CRI.
+	if containerRuntime != kubetypes.RktContainerRuntime {
+		// ...
+		switch containerRuntime {
+		case kubetypes.DockerContainerRuntime:
+			// Create and start the CRI shim running as a grpc server.
+			streamingConfig := getStreamingConfig(kubeCfg, kubeDeps)
+			ds, err := dockershim.NewDockerService(kubeDeps.DockerClientConfig,
+                                                   crOptions.PodSandboxImage, 
+                                                   streamingConfig,
+                                                   &pluginSettings, 
+                                                   runtimeCgroups, 
+                                                   kubeCfg.CgroupDriver,
+                                                   crOptions.DockershimRootDirectory,
+                                                   crOptions.DockerDisableSharedPID)
+
+			if err := ds.Start(); err != nil {
+              // ds.Start() 内部调用 ds.containerManager.Start()
+			}
+			// For now, the CRI shim redirects the streaming requests to the
+			// kubelet, which handles the requests using DockerService..
+			klet.criHandler = ds  // 调用dockershim.NewDockerService
+			
+          	 // ...
+			
+             // The unix socket for kubelet <-> dockershim communication.
+			server := dockerremote.NewDockerServer(remoteRuntimeEndpoint, ds)
+			if err := server.Start(); err != nil {
+                 // server.Start() 的调用, 默认启动 gRPC server unix:///var/run/dockershim.sock
+				// Start starts the dockershim grpc server.
+                 // func (s *DockerServer) Start() error {
+                 //     l, err := util.CreateListener(s.endpoint)
+                 //
+                 //      // Create the grpc server and register runtime and image services.
+                 //     s.server = grpc.NewServer()
+                 //     runtimeapi.RegisterRuntimeServiceServer(s.server, s.service)
+                 //     runtimeapi.RegisterImageServiceServer(s.server, s.service)
+                 // }
+			}
+
+			// Create dockerLegacyService when the logging driver is not supported.
+			supported, err := ds.IsCRISupportedLogDriver()
+			// ...
+		}  
+      
+        // ...
+        //  kl.containerRuntime 相关对象
+        runtimeService, imageService, err := getRuntimeAndImageServices(remoteRuntimeEndpoint, remoteImageEndpoint, kubeCfg.RuntimeRequestTimeout)
+
+		klet.runtimeService = runtimeService
+		runtime, err := kuberuntime.NewKubeGenericRuntimeManager(
+			kubecontainer.FilterEventRecorder(kubeDeps.Recorder),
+			klet.livenessManager,
+			seccompProfileRoot,
+			containerRefManager,
+			machineInfo,
+			klet,
+			kubeDeps.OSInterface,
+			klet,
+			httpClient,
+			imageBackOff,
+			kubeCfg.SerializeImagePulls,
+			float32(kubeCfg.RegistryPullQPS),
+			int(kubeCfg.RegistryBurst),
+			kubeCfg.CPUCFSQuota,
+			runtimeService,
+			imageService,
+			kubeDeps.ContainerManager.InternalContainerLifecycle(),
+			legacyLogProvider,
+		)
+
+      	// 设置对应的 containerRuntime 字段对象
+		klet.containerRuntime = runtime
+		klet.runner = runtime
+
+         // 设置 cAdvisor
+		if cadvisor.UsingLegacyCadvisorStats(containerRuntime, remoteRuntimeEndpoint) {
+			klet.StatsProvider = stats.NewCadvisorStatsProvider(
+				klet.cadvisor,
+				klet.resourceAnalyzer,
+				klet.podManager,
+				klet.runtimeCache,
+				klet.containerRuntime)
+		} else {
+			klet.StatsProvider = stats.NewCRIStatsProvider(
+				klet.cadvisor,
+				klet.resourceAnalyzer,
+				klet.podManager,
+				klet.runtimeCache,
+				runtimeService,
+				imageService)
+		}
+}
+```
+
+
+
+k8s.io/kubernetes/pkg/kubelet/dockershim/docker_service.go
+
+```go
+// NOTE: Anything passed to DockerService should be eventually handled in another way when we switch to running the shim as a different process.
+func NewDockerService(config *ClientConfig, 
+                      podSandboxImage string, 
+                      streamingConfig *streaming.Config,
+                      pluginSettings *NetworkPluginSettings, 
+                      cgroupsName string, 
+                      kubeCgroupDriver string, 
+                      dockershimRootDir string, 
+                      disableSharedPID bool) (DockerService, error) {
+
+	client := NewDockerClientFromConfig(config)
+	c := libdocker.NewInstrumentedInterface(client)
+	checkpointHandler, err := NewPersistentCheckpointHandler(dockershimRootDir)
+
+	ds := &dockerService{
+		client:          c,
+		os:              kubecontainer.RealOS{},
+		podSandboxImage: podSandboxImage,
+		streamingRuntime: &streamingRuntime{
+			client:      client,
+			execHandler: &NativeExecHandler{},
+		},
+		containerManager:  cm.NewContainerManager(cgroupsName, client),
+		checkpointHandler: checkpointHandler,
+		disableSharedPID:  disableSharedPID,
+		networkReady:      make(map[string]bool),
+	}
+
+	// check docker version compatibility.
+	// ...
+
+	// create streaming server if configured.
+	if streamingConfig != nil {
+         // 真正处理的 ServerHttp 的对象为 streaming.NewServer
+		ds.streamingServer, err = streaming.NewServer(*streamingConfig, ds.streamingRuntime)
+         // ...
+	}
+	// dockershim currently only supports CNI plugins.
+	cniPlugins := cni.ProbeNetworkPlugins(
+      				pluginSettings.PluginConfDir, 
+      				pluginSettings.PluginBinDir)
+	cniPlugins = append(cniPlugins, kubenet.NewPlugin(pluginSettings.PluginBinDir))
+	// set cni plugins .....
+	ds.network = network.NewPluginManager(plug)
+
+	// NOTE: cgroup driver is only detectable in docker 1.11+
+	cgroupDriver := defaultCgroupDriver
+	dockerInfo, err := ds.client.Info()
+
+	cgroupDriver = dockerInfo.CgroupDriver)
+	ds.cgroupDriver = cgroupDriver
+  	
+     // ...
+
+	// Register prometheus metrics.
+	metrics.Register()
+
+	return ds, nil
+}
+
+func (ds *dockerService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if ds.streamingServer != nil {
+		ds.streamingServer.ServeHTTP(w, r)
+	} else {
+		http.NotFound(w, r)
+	}
+}
+```
+
+
+
+k8s.io/kubernetes/pkg/kubelet/server/streaming/server.go
+
+streaming.server 对象最终调用 `restful.WebService`来生成对相应的处理，主要提供 `exec`/`attach`/`portforward `等操作
+
+```go
+// TODO(tallclair): Add auth(n/z) interface & handling.
+func NewServer(config Config, runtime Runtime) (Server, error) {
+	s := &server{
+		config:  config,
+		runtime: &criAdapter{runtime},
+		cache:   newRequestCache(),
+	}
+
+	if s.config.BaseURL == nil {
+		s.config.BaseURL = &url.URL{
+			Scheme: "http",
+			Host:   s.config.Addr,
+		}
+		if s.config.TLSConfig != nil {
+			s.config.BaseURL.Scheme = "https"
+		}
+	}
+
+	ws := &restful.WebService{}
+	endpoints := []struct {
+		path    string
+		handler restful.RouteFunction
+	}{
+		{"/exec/{token}", s.serveExec},
+		{"/attach/{token}", s.serveAttach},
+		{"/portforward/{token}", s.servePortForward},
+	}
+	// If serving relative to a base path, set that here.
+	pathPrefix := path.Dir(s.config.BaseURL.Path)
+	for _, e := range endpoints {
+		for _, method := range []string{"GET", "POST"} {
+			ws.Route(ws.
+				Method(method).
+				Path(path.Join(pathPrefix, e.path)).
+				To(e.handler))
+		}
+	}
+	handler := restful.NewContainer()
+	handler.Add(ws)
+	s.handler = handler
+	s.server = &http.Server{
+		Addr:      s.config.Addr,
+		Handler:   s.handler,
+		TLSConfig: s.config.TLSConfig,
+	}
+
+	return s, nil
+}
+```
+
+
+
+分析完 kl.criHandler 以后，我们再接着看 10250 端口的服务监听的主要流程：
+
+k8s.io/kubernetes/pkg/kubelet/server/server.go
+
+```go
+// ListenAndServeKubeletServer initializes a server to respond to HTTP network requests on the Kubelet.
+func ListenAndServeKubeletServer(
+	host HostInterface,
+	resourceAnalyzer stats.ResourceAnalyzer,
+	address net.IP,
+	port uint,
+	tlsOptions *TLSOptions,
+	auth AuthInterface,
+	enableDebuggingHandlers,
+	enableContentionProfiling bool,
+	runtime kubecontainer.Runtime,
+	criHandler http.Handler) {
+	handler := NewServer(host, resourceAnalyzer, auth, enableDebuggingHandlers, enableContentionProfiling, runtime, criHandler)
+	s := &http.Server{
+		Addr:           net.JoinHostPort(address.String(), 
+                                         strconv.FormatUint(uint64(port), 10)),
+		Handler:        &handler,
+		MaxHeaderBytes: 1 << 20,
+	}
+	
+	// 开始启动服务
+    glog.Fatal(s.ListenAndServe())
+
+}
+
+
+// NewServer initializes and configures a kubelet.Server object to handle HTTP requests.
+func NewServer(
+	host HostInterface,
+	resourceAnalyzer stats.ResourceAnalyzer,
+	auth AuthInterface,
+	enableDebuggingHandlers,
+	enableContentionProfiling bool,
+	runtime kubecontainer.Runtime,
+	criHandler http.Handler) Server {
+	server := Server{
+		host:             host,
+		resourceAnalyzer: resourceAnalyzer,
+		auth:             auth,
+		restfulCont:      &filteringContainer{Container: restful.NewContainer()},
+		runtime:          runtime,
+	}
+	if auth != nil {
+		server.InstallAuthFilter()
+	}
+    // 设置了主要的工作
+	server.InstallDefaultHandlers()
+	if enableDebuggingHandlers {
+		server.InstallDebuggingHandlers(criHandler)
+		if enableContentionProfiling {
+			goruntime.SetBlockProfileRate(1)
+		}
+	} else {
+		server.InstallDebuggingDisabledHandlers()
+	}
+	return server
+}
+
+// InstallDefaultHandlers registers the default set of supported HTTP request
+// patterns with the restful Container.
+func (s *Server) InstallDefaultHandlers() {
+	healthz.InstallHandler(s.restfulCont,
+		healthz.PingHealthz,
+		healthz.NamedCheck("syncloop", s.syncLoopHealthCheck),
+	)
+	ws := new(restful.WebService)
+	ws.Path("/pods").Produces(restful.MIME_JSON)
+	ws.Route(ws.GET("").To(s.getPods).Operation("getPods"))
+	s.restfulCont.Add(ws)
+
+	s.restfulCont.Add(stats.CreateHandlers(statsPath, s.host, s.resourceAnalyzer))
+	s.restfulCont.Handle(metricsPath, prometheus.Handler())
+
+	// cAdvisor metrics are exposed under the secured handler as well
+	r := prometheus.NewRegistry()
+	r.MustRegister(metrics.NewPrometheusCollector(prometheusHostAdapter{s.host}, containerPrometheusLabels))
+	s.restfulCont.Handle(cadvisorMetricsPath,
+		promhttp.HandlerFor(r, promhttp.HandlerOpts{ErrorHandling: promhttp.ContinueOnError}),
+	)
+
+	ws = new(restful.WebService)
+	ws.Path(specPath).Produces(restful.MIME_JSON)
+	ws.Route(ws.GET("").To(s.getSpec).Operation("getSpec").Writes(cadvisorapi.MachineInfo{}))
+	s.restfulCont.Add(ws)
+}
+
+// InstallDebuggingHandlers registers the HTTP request patterns that serve logs or run commands/containers
+func (s *Server) InstallDebuggingHandlers(criHandler http.Handler) {
+	glog.Infof("Adding debug handlers to kubelet server.")
+
+	ws := new(restful.WebService)
+	ws.Path("/run")
+	ws.Route(ws.POST("/{podNamespace}/{podID}/{containerName}").
+		To(s.getRun).
+		Operation("getRun"))
+	ws.Route(ws.POST("/{podNamespace}/{podID}/{uid}/{containerName}").
+		To(s.getRun).
+		Operation("getRun"))
+	s.restfulCont.Add(ws)
+
+	ws = new(restful.WebService)
+	ws.Path("/exec")
+	ws.Route(ws.GET("/{podNamespace}/{podID}/{containerName}").
+		To(s.getExec).
+		Operation("getExec"))
+	ws.Route(ws.POST("/{podNamespace}/{podID}/{containerName}").
+		To(s.getExec).
+		Operation("getExec"))
+	ws.Route(ws.GET("/{podNamespace}/{podID}/{uid}/{containerName}").
+		To(s.getExec).
+		Operation("getExec"))
+	ws.Route(ws.POST("/{podNamespace}/{podID}/{uid}/{containerName}").
+		To(s.getExec).
+		Operation("getExec"))
+	s.restfulCont.Add(ws)
+
+	ws = new(restful.WebService)
+	ws.Path("/attach")
+	ws.Route(ws.GET("/{podNamespace}/{podID}/{containerName}").
+		To(s.getAttach).
+		Operation("getAttach"))
+	ws.Route(ws.POST("/{podNamespace}/{podID}/{containerName}").
+		To(s.getAttach).
+		Operation("getAttach"))
+	ws.Route(ws.GET("/{podNamespace}/{podID}/{uid}/{containerName}").
+		To(s.getAttach).
+		Operation("getAttach"))
+	ws.Route(ws.POST("/{podNamespace}/{podID}/{uid}/{containerName}").
+		To(s.getAttach).
+		Operation("getAttach"))
+	s.restfulCont.Add(ws)
+
+	ws = new(restful.WebService)
+	ws.Path("/portForward")
+	ws.Route(ws.GET("/{podNamespace}/{podID}").To(s.getPortForward).
+		Operation("getPortForward"))
+	ws.Route(ws.POST("/{podNamespace}/{podID}").
+		To(s.getPortForward).
+		Operation("getPortForward"))
+  
+	ws.Route(ws.GET("/{podNamespace}/{podID}/{uid}").
+		To(s.getPortForward).
+		Operation("getPortForward"))
+  
+	ws.Route(ws.POST("/{podNamespace}/{podID}/{uid}").
+		To(s.getPortForward).
+		Operation("getPortForward"))
+  
+	s.restfulCont.Add(ws)
+
+	ws = new(restful.WebService)
+	ws.
+		Path(logsPath)
+	ws.Route(ws.GET("").To(s.getLogs).Operation("getLogs"))
+	ws.Route(ws.GET("/{logpath:*}").To(s.getLogs).Operation("getLogs").
+		Param(ws.PathParameter("logpath", "path to the log").DataType("string")))
+	s.restfulCont.Add(ws)
+
+	ws = new(restful.WebService)
+	ws.Path("/containerLogs")
+	ws.Route(ws.GET("/{podNamespace}/{podID}/{containerName}").To(s.getContainerLogs).
+		Operation("getContainerLogs"))
+	s.restfulCont.Add(ws)
+
+	configz.InstallHandler(s.restfulCont)
+
+	handlePprofEndpoint := func(req *restful.Request, resp *restful.Response) {
+		name := strings.TrimPrefix(req.Request.URL.Path, pprofBasePath)
+		switch name {
+		case "profile":
+			pprof.Profile(resp, req.Request)
+		case "symbol":
+			pprof.Symbol(resp, req.Request)
+		case "cmdline":
+			pprof.Cmdline(resp, req.Request)
+		case "trace":
+			pprof.Trace(resp, req.Request)
+		default:
+			pprof.Index(resp, req.Request)
+		}
+	}
+
+	// Setup pprof handlers.
+	ws = new(restful.WebService).Path(pprofBasePath)
+	ws.Route(ws.GET("/{subpath:*}").To(func(req *restful.Request, resp *restful.Response) {
+		handlePprofEndpoint(req, resp)
+	})).Doc("pprof endpoint")
+	s.restfulCont.Add(ws)
+
+	// The /runningpods endpoint is used for testing only.
+	ws = new(restful.WebService)
+	ws.Path("/runningpods/").Produces(restful.MIME_JSON)
+	ws.Route(ws.GET("").To(s.getRunningPods).Operation("getRunningPods"))
+	s.restfulCont.Add(ws)
+
+	if criHandler != nil {
+		s.restfulCont.Handle("/cri/", criHandler)
+	}
+}
+
 ```
 
