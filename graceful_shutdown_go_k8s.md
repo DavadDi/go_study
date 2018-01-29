@@ -33,6 +33,10 @@ Pod 终止的流程： [Kubernetes: Termination of pods](http://kubernetes.io/do
 8. 当 grace period超时过期，在 Pod 中仍然运行的任何进程都会被 SIGKILL杀掉；
 9. Kubelet会在API Server上设置grace period为0（立即删除）来完成删除的过程；Pod 将从API Server 中消息，不再出现在命令的列表中；
 
+
+
+![](https://jimmysong.io/kubernetes-handbook/images/zero-downtime-kubernetes-upgrade-tips.jpg)
+
 ## 2. Golang Graceful Shutdown
 
 HttpServer 的 [Shutdown](https://golang.org/pkg/net/http/#Server.Shutdown) 方法可以实现 graceful shutdown
