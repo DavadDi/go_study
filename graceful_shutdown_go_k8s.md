@@ -4,7 +4,7 @@
 
 ## 1. Pod 终止流程
 
-要对分布式条件下的进程保持水平扩展的能力，就必须保证进程不保存内存状态数据，可以做到随时结束和重生，尽管如此我们仍然希望在结束或者重生的过程中能够尽量小的影响到当前的既有服务的用户，比如服务进程能够停止Accept新的用户业务，但是仍然能够将当前已经在处理过程中的用户服务完成。go语言在1.8开始提供了graceful shutdown的能力，参见 [What's Coming in Go 1.8](https://tylerchr.blog/golang-18-whats-coming/)，如果1.8以前的版本，可以使用库 https://github.com/tylerb/graceful 来实现。
+要对分布式条件下的进程保持水平扩展的能力，就必须保证进程不保存内存状态数据，可以做到随时结束和重生，尽管如此我们仍然希望在结束或者重生的过程中能够尽量小的影响到当前的既有服务的用户，比如服务进程能够停止 Accept 新的用户业务，但是仍然能够将当前已经在处理过程中的用户服务完成。go语言在1.8开始提供了 graceful shutdown 的能力，参见 [What's Coming in Go 1.8](https://tylerchr.blog/golang-18-whats-coming/)，如果1.8以前的版本，可以使用库 https://github.com/tylerb/graceful 来实现。
 
 部署在Kubernetes中的Pod由于自动扩容 HPA、Pod或Deployment删除、Rolling Update等各种操作中，会导致Pod终止，Kubernetes中的Pod在终止过程中会经历以下阶段：
 
@@ -24,16 +24,24 @@
 Pod 终止的流程： [Kubernetes: Termination of pods](http://kubernetes.io/docs/user-guide/pods/#termination-of-pods)
 
 1. 用户发送删除 Pod 的命令，默认 grace period 为 30s ，可以通过 `--grace-period=60`调整；
+
 2. API Server 标记 Pod 状态为 Dead 状态，记录更新时间和 grace period；
+
 3. 通过 Client 命令查看，Pod被标记为 “Terminating”；
+
 4. （与3同时发生）当 Kubelet 进程监听 API Server 获取到 Pod 被更新为 Terminating，由于在第2步中设置了时间，于是启动关闭 Pod 的过程；
+
 5. 如果 Pod 定义了 preStop Hook，则在 Pod 内部进行调用；如果在 grace period 过期后，preStop 仍然在运行，步骤 2 的调用会将小幅度扩大 grace period 2s;
+
 6. Pod 中的进程接收到到 TERM 信号量；
+
 7. (与3同时发生)，Pod从Service 对应的 endpoints 中删除，不再被认为是 Replication Controllers 中运行的Pod，逐渐关闭的可以继续服务流量，就像负载局衡器（例如服务代理）把它们从它们的轮转中剔除一样；
-8. 当 grace period超时过期，在 Pod 中仍然运行的任何进程都会被 SIGKILL杀掉；
-9. Kubelet会在API Server上设置grace period为0（立即删除）来完成删除的过程；Pod 将从API Server 中消息，不再出现在命令的列表中；
 
+8. 当 grace period 超时过期，在 Pod 中仍然运行的任何进程都会被 SIGKILL杀掉；
 
+9. Kubelet 会在 API Server 上设置 grace period 为 0（立即删除）来完成删除的过程；Pod 将从API Server 中消息，不再出现在命令的列表中；
+
+   From: https://twitter.com/ahmetb
 
 ![](https://jimmysong.io/kubernetes-handbook/images/zero-downtime-kubernetes-upgrade-tips.jpg)
 
