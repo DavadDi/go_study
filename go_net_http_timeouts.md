@@ -1,16 +1,16 @@
 # net http timeouts
 
-## SetDeadline
+## 1. SetDeadline
 
 [`net.Conn`](https://golang.org/pkg/net/#Conn) 具有相关函数 `Set[Read|Write]Deadline(time.Time)`, 参数是绝对时间，当时间超时后会将操作的 I/O 失败，并返回 timeout 的error。
 
-Dealine并不是timeout超时，如果使用 `SetDeadline` 当做超时使用的话，需要在每一次的 `Read`和`Write`前调用来设置本次IO操作的到期时间。
+Deadline并不是timeout超时，如果使用 `SetDeadline` 当做超时使用的话，需要在每一次的 `Read`和`Write`前调用来设置本次IO操作的到期时间。
 
 我们可能不想使用 `SetDeadline`来设置超时，而是采用更高层次的超时函数通过 `net/http` 来随设置，但是在底层实现上仍然是通过底层调用 `SetDeadline`来实现的，读取或者写入数据不会重新设置超时的值。
 
 
 
-## Server Timeouts
+## 2. Server Timeouts
 
 ![aa](http://www.do1618.com/wp-content/uploads/2018/02/Server_Timeouts.png)
 
@@ -126,7 +126,7 @@ func (c *conn) serve(ctx context.Context) {
 
 
 
-## ## Client Timeout
+## 3. Client Timeout
 
 ![](http://www.do1618.com/wp-content/uploads/2018/02/Client_Timeouts.png) 
 
@@ -240,7 +240,9 @@ req = req.WithContext(ctx)
 
 
 
+## 4. 采用 httptrace 跟踪细节
 
+[TODO]
 
 ## 参考
 
