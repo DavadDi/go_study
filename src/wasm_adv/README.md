@@ -6,7 +6,15 @@
 ```bash
 $ GOOS=js GOARCH=wasm go build -o lib.wasm
 # Reducing the size of Wasm files
-$ gzip --best lib.wasm 
+# Error: parent directory is world writable but not sticky
+# sudo chmod +t /private/tmp/
+
+#$ brew tap tinygo-org/tools
+#$ brew install tinygo
+#$ tinygo build -o lib.wasm -target wasm ./lib.go
+
+# 1.4 M -> 32k
+
 $ cp $(go env GOROOT)/misc/wasm/wasm_exec.js .
 $ go run file_server.go
 ```
