@@ -5,7 +5,8 @@
 ## command 
 ```bash
 $ GOOS=js GOARCH=wasm go build -o lib.wasm
-
+# Reducing the size of Wasm files
+$ gzip --best lib.wasm 
 $ cp $(go env GOROOT)/misc/wasm/wasm_exec.js .
 $ go run file_server.go
 ```
